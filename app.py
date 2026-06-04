@@ -22,7 +22,7 @@ from zoneinfo import ZoneInfo
 
 APP_TITLE = "Household Wealth Tracker"
 CREATOR_NAME = "Eucalyptuss"
-APP_VERSION = "1.0"
+APP_VERSION = "1.0.1"
 BASE_DIR = Path(__file__).resolve().parent
 ET = ZoneInfo("America/New_York")
 TODAY = datetime.now(ET).date()
@@ -137,6 +137,7 @@ def inject_css() -> None:
         .warning-box { border-left: 4px solid var(--amber); background: rgba(251,191,36,0.10); padding: 0.75rem 1rem; border-radius: 12px; margin: 0.6rem 0 1rem 0; }
         .small-note { color: #64748b; font-size: 0.86rem; }
         div[data-testid="stMetric"] { border: 1px solid rgba(148,163,184,0.28); border-radius: 16px; padding: 0.75rem 0.9rem; background: rgba(248,250,252,0.55); }
+        div[data-testid="stDataFrame"] { border-radius: 14px; overflow: hidden; }
         </style>
         """,
         unsafe_allow_html=True,
@@ -1083,6 +1084,77 @@ def chart_label(name: str) -> str:
     return CHART_LABELS.get(str(name), str(name).replace("_", " ").replace("/", " / ").title())
 
 
+def _chart_value_template(label: str, decimals: int = 2) -> str:
+    label_text = str(label or "")
+    if "$" in label_text or any(term in label_text.lower() for term in ["p/l", "dividend", "value", "cost", "amount", "basis", "proceeds", "price"]):
+        return f"$%{{text:,.{decimals}f}}"
+    if "%" in label_text or any(term in label_text.lower() for term in ["yield", "return", "drawdown"]):
+        return f"%{{text:.{decimals}%}}"
+    return f"%{{text:,.{decimals}f}}"
+
+
+def improve_chart_readability(fig: go.Figure, *, height: int = 410, extra_top: int = 72, extra_right: int = 70, x_title: str = "", y_title: str = "", legend_title: str = "") -> go.Figure:
+    """Apply consistent margins and axis labels so chart labels do not get clipped."""
+    current_margin = fig.layout.margin or go.layout.Margin()
+    left = max(70, int(current_margin.l or 0))
+    right = max(extra_right, int(current_margin.r or 0))
+    top = max(extra_top, int(current_margin.t or 0))
+    bottom = max(72, int(current_margin.b or 0))
+    fig.update_layout(
+        height=height,
+        margin=dict(l=left, r=right, t=top, b=bottom),
+        xaxis_title=x_title,
+        yaxis_title=y_title,
+        legend_title_text=legend_title or None,
+        uniformtext_minsize=9,
+        uniformtext_mode="show",
+    )
+    fig.update_xaxes(automargin=True, title_standoff=12)
+    fig.update_yaxes(automargin=True, title_standoff=12)
+    return fig
+
+
+def apply_safe_bar_labels(fig: go.Figure, *, orientation: str = "v", value_label: str = "", decimals: int = 2) -> go.Figure:
+    """Show bar labels inside or outside without clipping at plot boundaries."""
+    text_template = _chart_value_template(value_label, decimals=decimals)
+    if orientation == "h":
+        fig.update_traces(
+            texttemplate=text_template,
+            textposition="outside",
+            textfont_size=11,
+            cliponaxis=False,
+            constraintext="none",
+        )
+        fig.update_layout(margin=dict(l=95, r=125, t=72, b=70), bargap=0.28)
+    else:
+        fig.update_traces(
+            texttemplate=text_template,
+            textposition="outside",
+            textfont_size=11,
+            cliponaxis=False,
+            constraintext="none",
+        )
+        fig.update_layout(margin=dict(l=70, r=85, t=78, b=78), bargap=0.28)
+    return fig
+
+
+def apply_safe_pie_labels(fig: go.Figure, *, legend_title: str = "") -> go.Figure:
+    """Prefer readable pie labels: outside callouts with generous margins."""
+    fig.update_traces(
+        textposition="outside",
+        textinfo="label+percent",
+        insidetextorientation="radial",
+        automargin=True,
+        hoverlabel=dict(namelength=-1),
+    )
+    fig.update_layout(
+        height=430,
+        margin=dict(l=60, r=125, t=75, b=55),
+        legend_title_text=legend_title or None,
+    )
+    return fig
+
+
 def labeled_empty_figure(title: str, xaxis_title: str = "", yaxis_title: str = "") -> go.Figure:
     fig = empty_figure(title)
     fig.update_layout(xaxis_title=xaxis_title, yaxis_title=yaxis_title)
@@ -1111,11 +1183,9 @@ def make_allocation_chart(holdings: pd.DataFrame, field: str = "Ticker", title: 
         labels={field: chart_label(field), "Market Value": "Market Value ($)"},
     )
     fig.update_traces(
-        textposition="inside",
-        textinfo="percent+label",
         hovertemplate=f"{chart_label(field)}: %{{label}}<br>Market Value: $%{{value:,.2f}}<br>Weight: %{{percent}}<extra></extra>",
     )
-    fig.update_layout(height=390, margin=dict(l=20, r=20, t=55, b=20), legend_title_text=chart_label(field))
+    apply_safe_pie_labels(fig, legend_title=chart_label(field))
     return fig
 
 def make_bar_chart(df: pd.DataFrame, x: str, y: str, title: str) -> go.Figure:
@@ -1130,20 +1200,11 @@ def make_bar_chart(df: pd.DataFrame, x: str, y: str, title: str) -> go.Figure:
         labels={x: chart_label(x), y: chart_label(y)},
         text=y,
     )
-    text_template = "$%{text:,.0f}" if any(term in chart_label(y) for term in ["$", "P/L", "Dividend", "Value", "Cost"]) else "%{text:,.2f}"
     fig.update_traces(
-        texttemplate=text_template,
-        textposition="outside",
         hovertemplate=f"{chart_label(x)}: %{{x}}<br>{chart_label(y)}: %{{y:,.2f}}<extra></extra>",
     )
-    fig.update_layout(
-        height=410,
-        margin=dict(l=20, r=20, t=55, b=55),
-        xaxis_title=chart_label(x),
-        yaxis_title=chart_label(y),
-        uniformtext_minsize=10,
-        uniformtext_mode="hide",
-    )
+    apply_safe_bar_labels(fig, orientation="v", value_label=chart_label(y), decimals=2)
+    improve_chart_readability(fig, height=430, x_title=chart_label(x), y_title=chart_label(y))
     return fig
 
 def make_top_movers_chart(holdings: pd.DataFrame) -> go.Figure:
@@ -1164,8 +1225,10 @@ def make_top_movers_chart(holdings: pd.DataFrame) -> go.Figure:
         title="Top Gainers / Losers",
         labels={"Return %": "Return (%)", "Ticker": "Ticker", "account_name": "Account", "Market Value": "Market Value ($)", "Unrealized P/L": "Unrealized P/L ($)"},
     )
-    fig.update_traces(texttemplate="%{text:.1%}", textposition="outside")
-    fig.update_layout(height=410, margin=dict(l=20, r=20, t=55, b=45), xaxis_title="Return (%)", yaxis_title="Ticker", xaxis_tickformat=".1%")
+    fig.update_traces(hoverlabel=dict(namelength=-1))
+    apply_safe_bar_labels(fig, orientation="h", value_label="Return (%)", decimals=1)
+    improve_chart_readability(fig, height=430, x_title="Return (%)", y_title="Ticker")
+    fig.update_xaxes(tickformat=".1%", zeroline=True, zerolinewidth=1)
     return fig
 
 def make_realized_chart(realized_df: pd.DataFrame, group: str = "Ticker") -> go.Figure:
@@ -1189,8 +1252,9 @@ def make_monthly_actual_dividend_chart(dividends: pd.DataFrame) -> go.Figure:
     data["Month"] = data["payment_date"].dt.to_period("M").astype(str)
     monthly = data.groupby("Month", as_index=False)["net_amount"].sum().rename(columns={"net_amount": "Actual Dividends"})
     fig = px.bar(monthly, x="Month", y="Actual Dividends", text="Actual Dividends", title="Monthly Actual Dividend Received", labels={"Month": "Month", "Actual Dividends": "Actual Dividends ($)"})
-    fig.update_traces(texttemplate="$%{text:,.2f}", textposition="outside", hovertemplate="Month: %{x}<br>Actual Dividends: $%{y:,.2f}<extra></extra>")
-    fig.update_layout(height=410, margin=dict(l=20, r=20, t=55, b=55), xaxis_title="Month", yaxis_title="Actual Dividends ($)")
+    fig.update_traces(hovertemplate="Month: %{x}<br>Actual Dividends: $%{y:,.2f}<extra></extra>")
+    apply_safe_bar_labels(fig, orientation="v", value_label="Actual Dividends ($)", decimals=2)
+    improve_chart_readability(fig, height=430, x_title="Month", y_title="Actual Dividends ($)")
     return fig
 
 def make_cumulative_dividend_chart(dividends: pd.DataFrame) -> go.Figure:
@@ -1204,8 +1268,8 @@ def make_cumulative_dividend_chart(dividends: pd.DataFrame) -> go.Figure:
         return labeled_empty_figure("Cumulative Actual Dividend", "Payment Date", "Cumulative Dividend ($)")
     data["Cumulative Dividend"] = data["net_amount"].cumsum()
     fig = px.line(data, x="payment_date", y="Cumulative Dividend", markers=True, title="Cumulative Actual Dividend", labels={"payment_date": "Payment Date", "Cumulative Dividend": "Cumulative Dividend ($)"})
-    fig.update_traces(hovertemplate="Payment Date: %{x|%Y-%m-%d}<br>Cumulative Dividend: $%{y:,.2f}<extra></extra>")
-    fig.update_layout(height=390, margin=dict(l=20, r=20, t=55, b=55), xaxis_title="Payment Date", yaxis_title="Cumulative Dividend ($)")
+    fig.update_traces(hovertemplate="Payment Date: %{x|%Y-%m-%d}<br>Cumulative Dividend: $%{y:,.2f}<extra></extra>", hoverlabel=dict(namelength=-1))
+    improve_chart_readability(fig, height=410, x_title="Payment Date", y_title="Cumulative Dividend ($)")
     return fig
 
 def build_upcoming_dividends(holdings: pd.DataFrame, dividend_analysis: Dict[str, Dict[str, Any]], days: int = 90) -> pd.DataFrame:
@@ -1250,13 +1314,14 @@ def make_upcoming_dividend_chart(upcoming: pd.DataFrame, days: int = 30) -> go.F
         return labeled_empty_figure(title, "Estimated Ex-Date", "Estimated Dividend Amount ($)")
     grouped = data.groupby("Estimated Ex-Date", as_index=False)["Estimated Dividend Amount"].sum()
     fig = px.bar(grouped, x="Estimated Ex-Date", y="Estimated Dividend Amount", text="Estimated Dividend Amount", title=title, labels={"Estimated Ex-Date": "Estimated Ex-Date", "Estimated Dividend Amount": "Estimated Dividend Amount ($)"})
-    fig.update_traces(texttemplate="$%{text:,.2f}", textposition="outside", hovertemplate="Estimated Ex-Date: %{x|%Y-%m-%d}<br>Estimated Dividend Amount: $%{y:,.2f}<extra></extra>")
-    fig.update_layout(height=380, margin=dict(l=20, r=20, t=55, b=55), xaxis_title="Estimated Ex-Date", yaxis_title="Estimated Dividend Amount ($)")
+    fig.update_traces(hovertemplate="Estimated Ex-Date: %{x|%Y-%m-%d}<br>Estimated Dividend Amount: $%{y:,.2f}<extra></extra>")
+    apply_safe_bar_labels(fig, orientation="v", value_label="Estimated Dividend Amount ($)", decimals=2)
+    improve_chart_readability(fig, height=410, x_title="Estimated Ex-Date", y_title="Estimated Dividend Amount ($)")
     return fig
 
 def make_monthly_estimated_dividend_calendar(upcoming: pd.DataFrame) -> go.Figure:
     if upcoming is None or upcoming.empty:
-        return empty_figure("Monthly Estimated Dividend Calendar")
+        return labeled_empty_figure("Monthly Estimated Dividend Calendar", "Month", "Estimated Dividend Amount ($)")
     data = upcoming.copy()
     data["Estimated Ex-Date"] = pd.to_datetime(data["Estimated Ex-Date"], errors="coerce")
     data["Month"] = data["Estimated Ex-Date"].dt.to_period("M").astype(str)
@@ -1291,7 +1356,8 @@ def make_price_chart(ticker: str, online_data: Dict[str, Dict[str, Any]], transa
     if not h.empty and safe_float(h["Shares"].sum()) > 0:
         avg = safe_float(h["Cost Basis"].sum()) / safe_float(h["Shares"].sum())
         fig.add_hline(y=avg, line_dash="dash", annotation_text="Avg Open Cost")
-    fig.update_layout(title=f"{ticker} Price Trend with BUY/SELL Markers", height=520, margin=dict(l=20, r=20, t=60, b=55), xaxis_title="Date", yaxis_title="Price ($)", legend_title_text="Price / Transaction")
+    improve_chart_readability(fig, height=540, extra_top=78, extra_right=95, x_title="Date", y_title="Price ($)", legend_title="Price / Transaction")
+    fig.update_layout(title=f"{ticker} Price Trend with BUY/SELL Markers")
     return fig
 
 
@@ -1310,7 +1376,8 @@ def make_normalized_chart(tickers: List[str], online_data: Dict[str, Dict[str, A
         used = True
     if not used:
         return empty_figure("Normalized Performance Comparison")
-    fig.update_layout(title="Normalized Performance Comparison", height=430, margin=dict(l=20, r=20, t=55, b=55), xaxis_title="Date", yaxis_title="Normalized Performance (Start = 100)", legend_title_text="Ticker / Benchmark")
+    improve_chart_readability(fig, height=450, extra_top=72, extra_right=95, x_title="Date", y_title="Normalized Performance (Start = 100)", legend_title="Ticker / Benchmark")
+    fig.update_layout(title="Normalized Performance Comparison")
     return fig
 
 
@@ -1327,7 +1394,9 @@ def make_drawdown_chart(tickers: List[str], online_data: Dict[str, Dict[str, Any
         used = True
     if not used:
         return empty_figure("Drawdown Chart")
-    fig.update_layout(title="Drawdown Chart", height=430, margin=dict(l=20, r=20, t=55, b=55), xaxis_title="Date", yaxis_title="Drawdown (%)", yaxis_tickformat=".1%", legend_title_text="Ticker")
+    improve_chart_readability(fig, height=450, extra_top=72, extra_right=95, x_title="Date", y_title="Drawdown (%)", legend_title="Ticker")
+    fig.update_layout(title="Drawdown Chart")
+    fig.update_yaxes(tickformat=".1%")
     return fig
 
 # ============================================================
@@ -1369,6 +1438,87 @@ def render_header(last_refresh: str) -> None:
     """, unsafe_allow_html=True)
 
 
+POSITIVE_TEXT = "color: #15803d; font-weight: 700;"
+NEGATIVE_TEXT = "color: #dc2626; font-weight: 700;"
+BLUE_TEXT = "color: #2563eb; font-weight: 700;"
+AMBER_TEXT = "color: #d97706; font-weight: 700;"
+GRAY_TEXT = "color: #64748b; font-weight: 700;"
+PURPLE_TEXT = "color: #7c3aed; font-weight: 700;"
+RED_TEXT = "color: #b91c1c; font-weight: 800;"
+DARK_TEXT = "color: #0f172a; font-weight: 700;"
+LIGHT_GRAY_TEXT = "color: #94a3b8; font-weight: 700;"
+
+
+def _numeric_value(value: Any) -> Optional[float]:
+    try:
+        if value is None or pd.isna(value):
+            return None
+        return float(value)
+    except Exception:
+        return None
+
+
+def table_cell_style(value: Any, column: str) -> str:
+    low = str(column).lower()
+    text = "" if value is None or pd.isna(value) else str(value).strip()
+    text_low = text.lower()
+
+    if low == "severity":
+        if text_low == "error":
+            return RED_TEXT
+        if text_low == "warning":
+            return AMBER_TEXT
+        if text_low == "info":
+            return BLUE_TEXT
+        return GRAY_TEXT
+
+    if any(k in low for k in ["status", "confidence", "type", "tax_bucket", "owner"]):
+        if text_low in {"active", "confirmed", "buy", "retirement", "me"}:
+            return POSITIVE_TEXT if text_low != "buy" else BLUE_TEXT
+        if text_low in {"sell", "estimated", "taxable", "warning"}:
+            return AMBER_TEXT
+        if text_low in {"closed", "unknown", "no dividend history", "excluded - closed", "unclassified", "inactive"}:
+            return GRAY_TEXT
+        if text_low == "spouse":
+            return PURPLE_TEXT
+
+    if any(k in low for k in ["ticker", "account", "broker"]):
+        return DARK_TEXT
+
+    number = _numeric_value(value)
+    if number is None:
+        return ""
+
+    is_return_col = "%" in column or "return" in low or "yield" in low or "drawdown" in low
+    is_profit_col = any(k in low for k in ["p/l", "difference", "gain", "loss", "return incl"])
+    is_dividend_col = "dividend" in low
+    is_money_col = any(k in low for k in ["value", "cost", "price", "amount", "basis", "proceeds", "dividend"])
+
+    if is_profit_col or is_return_col:
+        if number > 0:
+            return POSITIVE_TEXT
+        if number < 0:
+            return NEGATIVE_TEXT
+        return GRAY_TEXT
+
+    if is_dividend_col:
+        return BLUE_TEXT
+
+    if is_money_col:
+        return DARK_TEXT
+
+    return ""
+
+
+def style_dataframe(df: pd.DataFrame, *, formatters: Optional[Dict[str, Any]] = None):
+    styler = df.style
+    if formatters:
+        styler = styler.format(formatters)
+    for col in df.columns:
+        styler = styler.map(lambda v, c=col: table_cell_style(v, c), subset=[col])
+    return styler
+
+
 def style_money_table(df: pd.DataFrame, height: int = 430) -> None:
     if df is None or df.empty:
         st.info("No data available.")
@@ -1378,11 +1528,18 @@ def style_money_table(df: pd.DataFrame, height: int = 430) -> None:
         low = c.lower()
         if any(k in low for k in ["value", "cost", "price", "p/l", "dividend", "proceeds", "amount", "basis"]):
             formatters[c] = fmt_currency
-        if "%" in c or "yield" in low or "return" in low and c.endswith("%"):
+        if "%" in c or "yield" in low or ("return" in low and c.endswith("%")):
             formatters[c] = fmt_pct
         if "shares" in low:
             formatters[c] = lambda v: fmt_number(v, 4)
-    st.dataframe(df.style.format(formatters), use_container_width=True, height=height)
+    st.dataframe(style_dataframe(df, formatters=formatters), use_container_width=True, height=height)
+
+
+def style_data_quality_table(df: pd.DataFrame, height: int = 360) -> None:
+    if df is None or df.empty:
+        st.success("No data quality issues detected.")
+        return
+    st.dataframe(style_dataframe(df), use_container_width=True, height=height)
 
 # ============================================================
 # Sidebar and session controls
@@ -1687,7 +1844,7 @@ def render_data_manager(accounts_clean: pd.DataFrame, tx_clean: pd.DataFrame, di
         qc1.metric("Errors", dq_errors)
         qc2.metric("Warnings", dq_warnings)
         qc3.metric("Info", dq_infos)
-        st.dataframe(data_quality, use_container_width=True, height=360)
+        style_data_quality_table(data_quality, height=360)
     st.markdown("---")
     st.markdown("### Accounts Manager")
     st.code("account_id,owner,account_name,broker,account_type,tax_bucket,currency,is_active,note", language="text")
