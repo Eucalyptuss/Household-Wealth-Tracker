@@ -1,0 +1,5 @@
+account_id,owner,account_name,broker,account_type,tax_bucket,currency,is_active,note
+ME_FID_ROTH,Me,Fidelity Roth IRA,Fidelity,Roth IRA,Retirement,USD,TRUE,my retirement account
+ME_RH_TAXABLE,Me,Robinhood Taxable,Robinhood,Taxable Brokerage,Taxable,USD,TRUE,my taxable brokerage
+SP_FID_IRA,Spouse,Fidelity IRA,Fidelity,Traditional IRA,Retirement,USD,TRUE,spouse retirement account
+SP_FID_TAXABLE,Spouse,Fidelity Taxable,Fidelity,Taxable Brokerage,Taxable,USD,TRUE,spouse taxable brokerage

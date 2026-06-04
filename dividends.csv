@@ -1,0 +1,3 @@
+payment_date,ticker,net_amount,account_id,note
+2025-06-02,QQQT,3.21,ME_FID_TRA_IRA,monthly dividend
+2025-06-03,JEPI,1.17,ME_FID_TRA_IRA,monthly dividend
