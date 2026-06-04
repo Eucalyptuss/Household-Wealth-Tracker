@@ -22,7 +22,7 @@ from zoneinfo import ZoneInfo
 
 APP_TITLE = "Household Wealth Tracker"
 CREATOR_NAME = "Eucalyptuss"
-APP_VERSION = "1.0.1"
+APP_VERSION = "1.0.8"
 BASE_DIR = Path(__file__).resolve().parent
 ET = ZoneInfo("America/New_York")
 TODAY = datetime.now(ET).date()
@@ -108,36 +108,61 @@ def inject_css() -> None:
     st.markdown(
         """
         <style>
+        /* Theme-aware custom UI. Avoid fixed black/white text. */
         :root {
-            --green: #16a34a;
-            --red: #dc2626;
-            --blue: #2563eb;
-            --amber: #d97706;
-            --gray: #64748b;
-            --border: rgba(148,163,184,0.35);
-            --cardbg: rgba(255,255,255,0.78);
+            color-scheme: light dark;
+            --hwt-primary: var(--primary-color, #2563eb);
+            --hwt-text: var(--text-color, light-dark(#111827, #f9fafb));
+            --hwt-bg: var(--background-color, light-dark(#ffffff, #0e1117));
+            --hwt-soft-bg: var(--secondary-background-color, light-dark(#f8fafc, #1f2937));
+            --hwt-muted: light-dark(#475569, #cbd5e1);
+            --hwt-card-bg: light-dark(#ffffff, #111827);
+            --hwt-border: light-dark(rgba(15, 23, 42, 0.16), rgba(226, 232, 240, 0.24));
+            --hwt-positive: light-dark(#166534, #86efac);
+            --hwt-negative: light-dark(#b91c1c, #fca5a5);
+            --hwt-dividend: light-dark(#1d4ed8, #93c5fd);
+            --hwt-estimated: light-dark(#92400e, #fcd34d);
+            --hwt-warning-bg: light-dark(#fffbeb, #451a03);
+            --hwt-dividend-bg: light-dark(#eff6ff, #172554);
+        }
+        html, body, .stApp, [data-testid="stAppViewContainer"], .main {
+            color: var(--hwt-text) !important;
+            background-color: var(--hwt-bg);
         }
         .main .block-container { padding-top: 1.2rem; padding-bottom: 2rem; }
-        .dashboard-title { font-size: 2.05rem; font-weight: 850; line-height: 1.15; letter-spacing: -0.02em; margin-bottom: 0.2rem; }
-        .dashboard-subtitle { color: #64748b; font-size: 0.96rem; margin-bottom: 1rem; }
-        .meta-box { border: 1px solid var(--border); border-radius: 16px; padding: 0.8rem 1rem; background: rgba(248,250,252,0.72); margin-bottom: 1rem; font-size: 0.92rem; }
-        .version-banner { display: flex; align-items: center; justify-content: space-between; gap: 0.75rem; border: 1px solid rgba(37,99,235,0.22); border-radius: 16px; padding: 0.75rem 1rem; background: linear-gradient(135deg, rgba(37,99,235,0.10), rgba(248,250,252,0.82)); margin: 0.15rem 0 0.9rem 0; box-shadow: 0 6px 18px rgba(15,23,42,0.04); }
-        .version-banner-title { font-weight: 850; color: #0f172a; letter-spacing: -0.01em; }
-        .version-banner-meta { color: #475569; font-size: 0.9rem; font-weight: 700; white-space: nowrap; }
-        .kpi-card { border: 1px solid var(--border); border-radius: 18px; padding: 1rem 1rem; background: var(--cardbg); box-shadow: 0 8px 22px rgba(15,23,42,0.06); height: 150px; min-height: 150px; box-sizing: border-box; display: flex; flex-direction: column; justify-content: space-between; margin-bottom: 0.25rem; }
+        .dashboard-title { color: var(--hwt-text) !important; font-size: 2.05rem; font-weight: 850; line-height: 1.15; letter-spacing: -0.02em; margin-bottom: 0.2rem; }
+        .dashboard-subtitle { color: var(--hwt-muted) !important; font-size: 0.96rem; margin-bottom: 1rem; }
+        .meta-box { color: var(--hwt-text) !important; border: 1px solid var(--hwt-border); border-radius: 16px; padding: 0.8rem 1rem; background: var(--hwt-soft-bg); margin-bottom: 1rem; font-size: 0.92rem; }
+        .meta-box * { color: var(--hwt-text) !important; }
+        .version-banner { display: flex; align-items: center; justify-content: space-between; gap: 0.75rem; border: 1px solid light-dark(rgba(29,78,216,0.28), rgba(147,197,253,0.30)); border-radius: 16px; padding: 0.75rem 1rem; background: linear-gradient(135deg, var(--hwt-dividend-bg), var(--hwt-soft-bg)); margin: 0.15rem 0 0.9rem 0; box-shadow: 0 6px 18px rgba(15,23,42,0.06); }
+        .version-banner-title { font-weight: 850; color: var(--hwt-text) !important; letter-spacing: -0.01em; }
+        .version-banner-meta { color: var(--hwt-muted) !important; font-size: 0.9rem; font-weight: 700; white-space: nowrap; }
+        .kpi-card { color: var(--hwt-text) !important; border: 1px solid var(--hwt-border); border-radius: 18px; padding: 1rem 1rem; background: var(--hwt-card-bg); box-shadow: 0 8px 22px rgba(15,23,42,0.08); height: 150px; min-height: 150px; box-sizing: border-box; display: flex; flex-direction: column; justify-content: space-between; margin-bottom: 0.25rem; }
+        .kpi-card * { color: inherit; }
         .kpi-row-gap { height: 1.25rem; min-height: 1.25rem; }
-        .kpi-label { color: #64748b; font-size: 0.80rem; font-weight: 850; text-transform: uppercase; letter-spacing: 0.04em; margin-bottom: 0.45rem; line-height: 1.2; min-height: 1.95rem; }
-        .kpi-value { color: #0f172a; font-size: 1.48rem; line-height: 1.15; font-weight: 850; white-space: nowrap; }
-        .kpi-help { color: #64748b; font-size: 0.76rem; margin-top: 0.35rem; line-height: 1.2; min-height: 1.0rem; }
-        .positive { color: var(--green) !important; }
-        .negative { color: var(--red) !important; }
-        .neutral { color: #0f172a !important; }
-        .blue { color: var(--blue) !important; }
-        .amber { color: var(--amber) !important; }
-        .warning-box { border-left: 4px solid var(--amber); background: rgba(251,191,36,0.10); padding: 0.75rem 1rem; border-radius: 12px; margin: 0.6rem 0 1rem 0; }
-        .small-note { color: #64748b; font-size: 0.86rem; }
-        div[data-testid="stMetric"] { border: 1px solid rgba(148,163,184,0.28); border-radius: 16px; padding: 0.75rem 0.9rem; background: rgba(248,250,252,0.55); }
-        div[data-testid="stDataFrame"] { border-radius: 14px; overflow: hidden; }
+        .kpi-label { color: var(--hwt-muted) !important; font-size: 0.80rem; font-weight: 850; text-transform: uppercase; letter-spacing: 0.04em; margin-bottom: 0.45rem; line-height: 1.2; min-height: 1.95rem; }
+        .kpi-value { color: var(--hwt-text) !important; font-size: 1.48rem; line-height: 1.15; font-weight: 850; white-space: nowrap; }
+        .kpi-help { color: var(--hwt-muted) !important; font-size: 0.76rem; margin-top: 0.35rem; line-height: 1.2; min-height: 1.0rem; }
+        .positive { color: var(--hwt-positive) !important; }
+        .negative { color: var(--hwt-negative) !important; }
+        .neutral { color: var(--hwt-text) !important; }
+        .blue { color: var(--hwt-dividend) !important; }
+        .amber { color: var(--hwt-estimated) !important; }
+        .warning-box { color: var(--hwt-text) !important; border-left: 4px solid var(--hwt-estimated); background: var(--hwt-warning-bg); padding: 0.75rem 1rem; border-radius: 12px; margin: 0.6rem 0 1rem 0; }
+        .warning-box * { color: var(--hwt-text) !important; }
+        .small-note { color: var(--hwt-muted) !important; font-size: 0.86rem; }
+        div[data-testid="stMetric"] { color: var(--hwt-text) !important; border: 1px solid var(--hwt-border); border-radius: 16px; padding: 0.75rem 0.9rem; background: var(--hwt-soft-bg); }
+        div[data-testid="stMetric"] * { color: var(--hwt-text) !important; }
+        div[data-testid="stMetricDelta"] svg { fill: currentColor !important; }
+        div[data-testid="stMarkdownContainer"], div[data-testid="stCaptionContainer"], .stMarkdown, .stMarkdown p, .stMarkdown li, .stMarkdown span, .stMarkdown div { color: var(--hwt-text) !important; }
+        .stMarkdown h1, .stMarkdown h2, .stMarkdown h3, .stMarkdown h4, .stMarkdown h5, .stMarkdown h6 { color: var(--hwt-text) !important; }
+        label, .stSelectbox label, .stMultiSelect label, .stSlider label, .stFileUploader label, .stRadio label, .stCheckbox label { color: var(--hwt-text) !important; }
+        div[data-testid="stAlert"] * { color: var(--hwt-text) !important; }
+        div[data-testid="stExpander"] * { color: var(--hwt-text); }
+        [data-testid="stSidebar"] * { color: var(--hwt-text); }
+        [data-testid="stSidebar"] .stCaptionContainer, [data-testid="stSidebar"] small { color: var(--hwt-muted) !important; }
+        .hwt-muted-text { color: var(--hwt-muted) !important; }
+        .hwt-table-note { color: var(--hwt-muted) !important; font-size: 0.86rem; }
         </style>
         """,
         unsafe_allow_html=True,
@@ -376,7 +401,7 @@ def validate_accounts(df: pd.DataFrame) -> Tuple[pd.DataFrame, pd.DataFrame, pd.
         if _is_blank_like(row["account_name"]):
             add_quality_issue(issues, "Warning", row_no, "account_name", row["account_name"], "accounts.csv: account_name is blank. account_id will be displayed.")
         if str(row["currency"]).upper() != "USD":
-            add_quality_issue(issues, "Warning", row_no, "currency", row["currency"], "This MVP assumes USD-denominated ETF data.")
+            add_quality_issue(issues, "Warning", row_no, "currency", row["currency"], "This version assumes USD-denominated security data.")
     duplicated = clean.duplicated(subset=["account_id"], keep=False)
     if duplicated.any():
         for _, row in clean.loc[duplicated].iterrows():
@@ -1048,6 +1073,67 @@ def exposure_by_ticker(holdings: pd.DataFrame) -> pd.DataFrame:
 # ============================================================
 
 
+
+def active_theme_base() -> str:
+    """Return the active display theme for non-CSS renderers.
+
+    Plotly SVG and Pandas Styler need concrete colors. Streamlit's active UI
+    theme is not always exposed to Python in every deployment mode, so the app
+    uses Auto detection first and provides a sidebar override for chart/table
+    contrast when needed.
+    """
+    override = str(st.session_state.get("display_theme_mode", "Auto")).lower()
+    if override in {"dark", "light"}:
+        return override
+    try:
+        # Streamlit config theme. Works when theme.base is explicitly set.
+        base = st.get_option("theme.base")
+        if str(base).lower() in {"dark", "light"}:
+            return str(base).lower()
+    except Exception:
+        pass
+    try:
+        # Defensive support for newer Streamlit context objects, if available.
+        ctx = getattr(st, "context", None)
+        theme = getattr(ctx, "theme", None) if ctx is not None else None
+        if isinstance(theme, dict):
+            base = theme.get("base") or theme.get("type")
+            if str(base).lower() in {"dark", "light"}:
+                return str(base).lower()
+        elif theme is not None:
+            base = getattr(theme, "base", None) or getattr(theme, "type", None)
+            if str(base).lower() in {"dark", "light"}:
+                return str(base).lower()
+    except Exception:
+        pass
+    return "light"
+
+
+def hwt_palette() -> Dict[str, str]:
+    """Theme-aware CSS colors for custom HTML and optional table highlighting.
+
+    Do not use Python-side dark/light detection for table/chart text. Streamlit's
+    active browser theme is the source of truth. CSS variables are resolved by the
+    browser after the user switches Light/Dark mode, so the same app run can adapt
+    without stale bright/dark text being carried over from session state.
+    """
+    return {
+        "text": "var(--text-color, #111827)",
+        "muted": "var(--hwt-muted, var(--text-color, #475569))",
+        "background": "var(--background-color, #ffffff)",
+        "secondary_background": "var(--secondary-background-color, #f8fafc)",
+        "table_header_bg": "var(--secondary-background-color, #f8fafc)",
+        "table_row_bg": "transparent",
+        "table_alt_bg": "var(--secondary-background-color, rgba(148, 163, 184, 0.08))",
+        "border": "var(--hwt-border, rgba(128, 128, 128, 0.24))",
+        "grid": "rgba(128, 128, 128, 0.24)",
+        "positive": "var(--hwt-positive, #166534)",
+        "negative": "var(--hwt-negative, #b91c1c)",
+        "dividend": "var(--hwt-dividend, #1d4ed8)",
+        "estimated": "var(--hwt-estimated, #92400e)",
+        "info": "var(--hwt-muted, var(--text-color, #475569))",
+    }
+
 CHART_LABELS = {
     "ticker": "Ticker",
     "Ticker": "Ticker",
@@ -1084,87 +1170,127 @@ def chart_label(name: str) -> str:
     return CHART_LABELS.get(str(name), str(name).replace("_", " ").replace("/", " / ").title())
 
 
-def _chart_value_template(label: str, decimals: int = 2) -> str:
-    label_text = str(label or "")
-    if "$" in label_text or any(term in label_text.lower() for term in ["p/l", "dividend", "value", "cost", "amount", "basis", "proceeds", "price"]):
-        return f"$%{{text:,.{decimals}f}}"
-    if "%" in label_text or any(term in label_text.lower() for term in ["yield", "return", "drawdown"]):
-        return f"%{{text:.{decimals}%}}"
-    return f"%{{text:,.{decimals}f}}"
+def is_money_measure(label_or_name: str) -> bool:
+    text = chart_label(label_or_name)
+    return any(token in text for token in ["$", "P/L", "Dividend", "Value", "Cost", "Price", "Proceeds", "Amount", "Basis"])
 
 
-def improve_chart_readability(fig: go.Figure, *, height: int = 410, extra_top: int = 72, extra_right: int = 70, x_title: str = "", y_title: str = "", legend_title: str = "") -> go.Figure:
-    """Apply consistent margins and axis labels so chart labels do not get clipped."""
-    current_margin = fig.layout.margin or go.layout.Margin()
-    left = max(70, int(current_margin.l or 0))
-    right = max(extra_right, int(current_margin.r or 0))
-    top = max(extra_top, int(current_margin.t or 0))
-    bottom = max(72, int(current_margin.b or 0))
+def is_percent_measure(label_or_name: str) -> bool:
+    text = chart_label(label_or_name)
+    return "%" in text or "Yield" in text or "Return (%)" in text or "Drawdown" in text
+
+
+def label_template_for_measure(label_or_name: str, value_is_fraction: bool = False) -> str:
+    if is_money_measure(label_or_name):
+        return "$%{text:,.2f}"
+    if is_percent_measure(label_or_name):
+        return "%{text:.1%}" if value_is_fraction else "%{text:,.1f}%"
+    return "%{text:,.2f}"
+
+
+def add_numeric_axis_padding(fig: go.Figure, values: Iterable[Any], axis: str = "y", zero_floor: bool = True) -> None:
+    numeric = pd.to_numeric(pd.Series(list(values)), errors="coerce").dropna()
+    if numeric.empty:
+        return
+    vmin = float(numeric.min())
+    vmax = float(numeric.max())
+    if math.isclose(vmin, vmax):
+        pad = max(abs(vmax) * 0.18, 1.0)
+    else:
+        pad = max((vmax - vmin) * 0.18, abs(vmax) * 0.06, abs(vmin) * 0.06, 1e-9)
+    lower = 0.0 if zero_floor and vmin >= 0 else vmin - pad
+    upper = vmax + pad
+    if axis == "x":
+        fig.update_xaxes(range=[lower, upper])
+    else:
+        fig.update_yaxes(range=[lower, upper])
+
+
+def apply_chart_theme(
+    fig: go.Figure,
+    *,
+    height: int = 410,
+    xaxis_title: str = "",
+    yaxis_title: str = "",
+    legend_title: str = "",
+    top: int = 76,
+    bottom: int = 76,
+    left: int = 84,
+    right: int = 54,
+) -> go.Figure:
+    """Apply layout spacing while letting Streamlit/browser theme control text.
+
+    The previous implementation selected concrete light/dark text colors in Python.
+    That can become stale when the user changes Streamlit theme in the browser. Use
+    CSS variables for Plotly text so chart labels follow the active app theme.
+    """
+    theme_text = "var(--text-color, #111827)"
+    theme_grid = "rgba(128, 128, 128, 0.24)"
     fig.update_layout(
         height=height,
         margin=dict(l=left, r=right, t=top, b=bottom),
-        xaxis_title=x_title,
-        yaxis_title=y_title,
-        legend_title_text=legend_title or None,
-        uniformtext_minsize=9,
-        uniformtext_mode="show",
+        paper_bgcolor="rgba(0,0,0,0)",
+        plot_bgcolor="rgba(0,0,0,0)",
+        xaxis_title=xaxis_title,
+        yaxis_title=yaxis_title,
+        legend_title_text=legend_title,
+        hovermode="closest",
+        font=dict(color=theme_text),
+        title=dict(font=dict(color=theme_text)),
+        legend=dict(
+            font=dict(color=theme_text),
+            title=dict(font=dict(color=theme_text)),
+            bgcolor="rgba(0,0,0,0)",
+        ),
     )
-    fig.update_xaxes(automargin=True, title_standoff=12)
-    fig.update_yaxes(automargin=True, title_standoff=12)
-    return fig
-
-
-def apply_safe_bar_labels(fig: go.Figure, *, orientation: str = "v", value_label: str = "", decimals: int = 2) -> go.Figure:
-    """Show bar labels inside or outside without clipping at plot boundaries."""
-    text_template = _chart_value_template(value_label, decimals=decimals)
-    if orientation == "h":
-        fig.update_traces(
-            texttemplate=text_template,
-            textposition="outside",
-            textfont_size=11,
-            cliponaxis=False,
-            constraintext="none",
-        )
-        fig.update_layout(margin=dict(l=95, r=125, t=72, b=70), bargap=0.28)
-    else:
-        fig.update_traces(
-            texttemplate=text_template,
-            textposition="outside",
-            textfont_size=11,
-            cliponaxis=False,
-            constraintext="none",
-        )
-        fig.update_layout(margin=dict(l=70, r=85, t=78, b=78), bargap=0.28)
-    return fig
-
-
-def apply_safe_pie_labels(fig: go.Figure, *, legend_title: str = "") -> go.Figure:
-    """Prefer readable pie labels: outside callouts with generous margins."""
-    fig.update_traces(
-        textposition="outside",
-        textinfo="label+percent",
-        insidetextorientation="radial",
+    fig.update_xaxes(
         automargin=True,
-        hoverlabel=dict(namelength=-1),
+        title_standoff=18,
+        tickfont=dict(color=theme_text),
+        title_font=dict(color=theme_text),
+        gridcolor=theme_grid,
+        zerolinecolor=theme_grid,
+        linecolor=theme_grid,
     )
-    fig.update_layout(
-        height=430,
-        margin=dict(l=60, r=125, t=75, b=55),
-        legend_title_text=legend_title or None,
+    fig.update_yaxes(
+        automargin=True,
+        title_standoff=18,
+        tickfont=dict(color=theme_text),
+        title_font=dict(color=theme_text),
+        gridcolor=theme_grid,
+        zerolinecolor=theme_grid,
+        linecolor=theme_grid,
     )
+    fig.update_traces(textfont=dict(color=theme_text))
+    for annotation in fig.layout.annotations or []:
+        annotation.font = dict(color=theme_text)
     return fig
 
 
-def labeled_empty_figure(title: str, xaxis_title: str = "", yaxis_title: str = "") -> go.Figure:
-    fig = empty_figure(title)
-    fig.update_layout(xaxis_title=xaxis_title, yaxis_title=yaxis_title)
+def apply_bar_label_safety(fig: go.Figure, values: Iterable[Any], *, orientation: str = "v", zero_floor: bool = True) -> go.Figure:
+    """Keep bar labels inside the visible plotting area by adding axis headroom.
+
+    Plotly labels placed outside bars can be clipped or can overlap axes when the range is
+    too tight. This helper expands the numeric axis and disables clipping for label text.
+    """
+    axis = "x" if orientation == "h" else "y"
+    add_numeric_axis_padding(fig, values, axis=axis, zero_floor=zero_floor)
+    fig.update_traces(cliponaxis=False, constraintext="none")
     return fig
 
 
 def empty_figure(title: str) -> go.Figure:
     fig = go.Figure()
-    fig.update_layout(title=title, height=360, annotations=[{"text": "No data available", "showarrow": False, "xref": "paper", "yref": "paper", "x": 0.5, "y": 0.5}])
-    return fig
+    fig.update_layout(
+        title=title,
+        annotations=[{"text": "No data available", "showarrow": False, "xref": "paper", "yref": "paper", "x": 0.5, "y": 0.5, "font": {"color": "var(--text-color, #111827)"}}],
+    )
+    return apply_chart_theme(fig, height=360, top=64, bottom=64, left=72, right=42)
+
+
+def labeled_empty_figure(title: str, xaxis_title: str = "", yaxis_title: str = "") -> go.Figure:
+    fig = empty_figure(title)
+    return apply_chart_theme(fig, height=360, xaxis_title=xaxis_title, yaxis_title=yaxis_title, top=64, bottom=64, left=78, right=42)
 
 
 def make_allocation_chart(holdings: pd.DataFrame, field: str = "Ticker", title: str = "Allocation") -> go.Figure:
@@ -1178,15 +1304,19 @@ def make_allocation_chart(holdings: pd.DataFrame, field: str = "Ticker", title: 
         data,
         names=field,
         values="Market Value",
-        hole=0.45,
+        hole=0.44,
         title=title,
         labels={field: chart_label(field), "Market Value": "Market Value ($)"},
     )
     fig.update_traces(
+        textposition="inside",
+        textinfo="percent+label",
+        insidetextorientation="radial",
         hovertemplate=f"{chart_label(field)}: %{{label}}<br>Market Value: $%{{value:,.2f}}<br>Weight: %{{percent}}<extra></extra>",
     )
-    apply_safe_pie_labels(fig, legend_title=chart_label(field))
-    return fig
+    fig.update_layout(uniformtext_minsize=10, uniformtext_mode="show")
+    return apply_chart_theme(fig, height=420, legend_title=chart_label(field), top=76, bottom=54, left=42, right=78)
+
 
 def make_bar_chart(df: pd.DataFrame, x: str, y: str, title: str) -> go.Figure:
     if df is None or df.empty or x not in df.columns or y not in df.columns:
@@ -1201,11 +1331,14 @@ def make_bar_chart(df: pd.DataFrame, x: str, y: str, title: str) -> go.Figure:
         text=y,
     )
     fig.update_traces(
+        texttemplate=label_template_for_measure(y),
+        textposition="outside",
         hovertemplate=f"{chart_label(x)}: %{{x}}<br>{chart_label(y)}: %{{y:,.2f}}<extra></extra>",
     )
-    apply_safe_bar_labels(fig, orientation="v", value_label=chart_label(y), decimals=2)
-    improve_chart_readability(fig, height=430, x_title=chart_label(x), y_title=chart_label(y))
-    return fig
+    fig.update_layout(uniformtext_minsize=10, uniformtext_mode="show")
+    fig = apply_bar_label_safety(fig, data[y], orientation="v", zero_floor=True)
+    return apply_chart_theme(fig, height=430, xaxis_title=chart_label(x), yaxis_title=chart_label(y), top=84, bottom=88, left=92, right=60)
+
 
 def make_top_movers_chart(holdings: pd.DataFrame) -> go.Figure:
     if holdings is None or holdings.empty:
@@ -1225,19 +1358,19 @@ def make_top_movers_chart(holdings: pd.DataFrame) -> go.Figure:
         title="Top Gainers / Losers",
         labels={"Return %": "Return (%)", "Ticker": "Ticker", "account_name": "Account", "Market Value": "Market Value ($)", "Unrealized P/L": "Unrealized P/L ($)"},
     )
-    fig.update_traces(hoverlabel=dict(namelength=-1))
-    apply_safe_bar_labels(fig, orientation="h", value_label="Return (%)", decimals=1)
-    improve_chart_readability(fig, height=430, x_title="Return (%)", y_title="Ticker")
-    fig.update_xaxes(tickformat=".1%", zeroline=True, zerolinewidth=1)
-    return fig
+    fig.update_traces(texttemplate="%{text:.1%}", textposition="outside", cliponaxis=False)
+    fig = apply_bar_label_safety(fig, top["Return %"], orientation="h", zero_floor=False)
+    fig.update_xaxes(tickformat=".1%", zeroline=True)
+    return apply_chart_theme(fig, height=430, xaxis_title="Return (%)", yaxis_title="Ticker", top=84, bottom=76, left=86, right=76)
+
 
 def make_realized_chart(realized_df: pd.DataFrame, group: str = "Ticker") -> go.Figure:
     if realized_df is None or realized_df.empty or "Realized P/L" not in realized_df.columns:
-        return empty_figure("Realized P/L")
+        return labeled_empty_figure("Realized P/L", chart_label(group), "Realized P/L ($)")
     if group not in realized_df.columns:
         group = "Ticker"
     data = realized_df.groupby(group, as_index=False)["Realized P/L"].sum().sort_values("Realized P/L", ascending=False)
-    return make_bar_chart(data, group, "Realized P/L", f"Realized P/L by {group}")
+    return make_bar_chart(data, group, "Realized P/L", f"Realized P/L by {chart_label(group)}")
 
 
 def make_monthly_actual_dividend_chart(dividends: pd.DataFrame) -> go.Figure:
@@ -1252,10 +1385,11 @@ def make_monthly_actual_dividend_chart(dividends: pd.DataFrame) -> go.Figure:
     data["Month"] = data["payment_date"].dt.to_period("M").astype(str)
     monthly = data.groupby("Month", as_index=False)["net_amount"].sum().rename(columns={"net_amount": "Actual Dividends"})
     fig = px.bar(monthly, x="Month", y="Actual Dividends", text="Actual Dividends", title="Monthly Actual Dividend Received", labels={"Month": "Month", "Actual Dividends": "Actual Dividends ($)"})
-    fig.update_traces(hovertemplate="Month: %{x}<br>Actual Dividends: $%{y:,.2f}<extra></extra>")
-    apply_safe_bar_labels(fig, orientation="v", value_label="Actual Dividends ($)", decimals=2)
-    improve_chart_readability(fig, height=430, x_title="Month", y_title="Actual Dividends ($)")
-    return fig
+    fig.update_traces(texttemplate="$%{text:,.2f}", textposition="outside", hovertemplate="Month: %{x}<br>Actual Dividends: $%{y:,.2f}<extra></extra>")
+    fig.update_layout(uniformtext_minsize=10, uniformtext_mode="show")
+    fig = apply_bar_label_safety(fig, monthly["Actual Dividends"], orientation="v", zero_floor=True)
+    return apply_chart_theme(fig, height=430, xaxis_title="Month", yaxis_title="Actual Dividends ($)", top=84, bottom=88, left=92, right=60)
+
 
 def make_cumulative_dividend_chart(dividends: pd.DataFrame) -> go.Figure:
     if dividends is None or dividends.empty:
@@ -1268,9 +1402,10 @@ def make_cumulative_dividend_chart(dividends: pd.DataFrame) -> go.Figure:
         return labeled_empty_figure("Cumulative Actual Dividend", "Payment Date", "Cumulative Dividend ($)")
     data["Cumulative Dividend"] = data["net_amount"].cumsum()
     fig = px.line(data, x="payment_date", y="Cumulative Dividend", markers=True, title="Cumulative Actual Dividend", labels={"payment_date": "Payment Date", "Cumulative Dividend": "Cumulative Dividend ($)"})
-    fig.update_traces(hovertemplate="Payment Date: %{x|%Y-%m-%d}<br>Cumulative Dividend: $%{y:,.2f}<extra></extra>", hoverlabel=dict(namelength=-1))
-    improve_chart_readability(fig, height=410, x_title="Payment Date", y_title="Cumulative Dividend ($)")
-    return fig
+    fig.update_traces(hovertemplate="Payment Date: %{x|%Y-%m-%d}<br>Cumulative Dividend: $%{y:,.2f}<extra></extra>")
+    fig.update_xaxes(tickformat="%Y-%m-%d")
+    return apply_chart_theme(fig, height=410, xaxis_title="Payment Date", yaxis_title="Cumulative Dividend ($)", top=76, bottom=82, left=92, right=54)
+
 
 def build_upcoming_dividends(holdings: pd.DataFrame, dividend_analysis: Dict[str, Dict[str, Any]], days: int = 90) -> pd.DataFrame:
     rows = []
@@ -1314,16 +1449,21 @@ def make_upcoming_dividend_chart(upcoming: pd.DataFrame, days: int = 30) -> go.F
         return labeled_empty_figure(title, "Estimated Ex-Date", "Estimated Dividend Amount ($)")
     grouped = data.groupby("Estimated Ex-Date", as_index=False)["Estimated Dividend Amount"].sum()
     fig = px.bar(grouped, x="Estimated Ex-Date", y="Estimated Dividend Amount", text="Estimated Dividend Amount", title=title, labels={"Estimated Ex-Date": "Estimated Ex-Date", "Estimated Dividend Amount": "Estimated Dividend Amount ($)"})
-    fig.update_traces(hovertemplate="Estimated Ex-Date: %{x|%Y-%m-%d}<br>Estimated Dividend Amount: $%{y:,.2f}<extra></extra>")
-    apply_safe_bar_labels(fig, orientation="v", value_label="Estimated Dividend Amount ($)", decimals=2)
-    improve_chart_readability(fig, height=410, x_title="Estimated Ex-Date", y_title="Estimated Dividend Amount ($)")
-    return fig
+    fig.update_traces(texttemplate="$%{text:,.2f}", textposition="outside", hovertemplate="Estimated Ex-Date: %{x|%Y-%m-%d}<br>Estimated Dividend Amount: $%{y:,.2f}<extra></extra>")
+    fig.update_xaxes(tickformat="%Y-%m-%d")
+    fig.update_layout(uniformtext_minsize=10, uniformtext_mode="show")
+    fig = apply_bar_label_safety(fig, grouped["Estimated Dividend Amount"], orientation="v", zero_floor=True)
+    return apply_chart_theme(fig, height=410, xaxis_title="Estimated Ex-Date", yaxis_title="Estimated Dividend Amount ($)", top=84, bottom=88, left=92, right=60)
+
 
 def make_monthly_estimated_dividend_calendar(upcoming: pd.DataFrame) -> go.Figure:
     if upcoming is None or upcoming.empty:
         return labeled_empty_figure("Monthly Estimated Dividend Calendar", "Month", "Estimated Dividend Amount ($)")
     data = upcoming.copy()
     data["Estimated Ex-Date"] = pd.to_datetime(data["Estimated Ex-Date"], errors="coerce")
+    data = data.dropna(subset=["Estimated Ex-Date"])
+    if data.empty:
+        return labeled_empty_figure("Monthly Estimated Dividend Calendar", "Month", "Estimated Dividend Amount ($)")
     data["Month"] = data["Estimated Ex-Date"].dt.to_period("M").astype(str)
     monthly = data.groupby("Month", as_index=False)["Estimated Dividend Amount"].sum()
     return make_bar_chart(monthly, "Month", "Estimated Dividend Amount", "Monthly Estimated Dividend Calendar")
@@ -1332,7 +1472,7 @@ def make_monthly_estimated_dividend_calendar(upcoming: pd.DataFrame) -> go.Figur
 def make_price_chart(ticker: str, online_data: Dict[str, Dict[str, Any]], transactions: pd.DataFrame, holdings: pd.DataFrame) -> go.Figure:
     hist = online_data.get(ticker, {}).get("history", {}).get("history", pd.DataFrame())
     if hist is None or hist.empty or "Close" not in hist.columns:
-        return empty_figure(f"{ticker} Price Trend")
+        return labeled_empty_figure(f"{ticker} Price Trend", "Date", "Price ($)")
     data = hist.copy()
     data["MA20"] = data["Close"].rolling(20).mean()
     data["MA60"] = data["Close"].rolling(60).mean()
@@ -1349,16 +1489,22 @@ def make_price_chart(ticker: str, online_data: Dict[str, Dict[str, Any]], transa
                 y=subset["price"],
                 mode="markers",
                 name=f"{name} Transaction",
-                marker=dict(symbol=symbol, size=11),
+                marker=dict(symbol=symbol, size=12, line=dict(width=1)),
                 hovertemplate=f"{name} Date: %{{x|%Y-%m-%d}}<br>{name} Price: $%{{y:,.2f}}<extra></extra>",
             ))
     h = holdings[(holdings["Ticker"] == ticker) & (holdings["Holding Status"] == "Active")] if holdings is not None and not holdings.empty else pd.DataFrame()
     if not h.empty and safe_float(h["Shares"].sum()) > 0:
         avg = safe_float(h["Cost Basis"].sum()) / safe_float(h["Shares"].sum())
-        fig.add_hline(y=avg, line_dash="dash", annotation_text="Avg Open Cost")
-    improve_chart_readability(fig, height=540, extra_top=78, extra_right=95, x_title="Date", y_title="Price ($)", legend_title="Price / Transaction")
+        fig.add_hline(
+            y=avg,
+            line_dash="dash",
+            line_color="var(--text-color, #111827)",
+            annotation_text="Avg Open Cost",
+            annotation_position="top left",
+            annotation_font_color="var(--text-color, #111827)",
+        )
     fig.update_layout(title=f"{ticker} Price Trend with BUY/SELL Markers")
-    return fig
+    return apply_chart_theme(fig, height=540, xaxis_title="Date", yaxis_title="Price ($)", legend_title="Price / Transaction", top=86, bottom=82, left=92, right=72)
 
 
 def make_normalized_chart(tickers: List[str], online_data: Dict[str, Dict[str, Any]], benchmark: str) -> go.Figure:
@@ -1375,10 +1521,9 @@ def make_normalized_chart(tickers: List[str], online_data: Dict[str, Dict[str, A
         fig.add_trace(go.Scatter(x=close["Date"], y=close["Normalized"], mode="lines", name=ticker, hovertemplate="Date: %{x|%Y-%m-%d}<br>Normalized Performance: %{y:,.2f}<extra></extra>"))
         used = True
     if not used:
-        return empty_figure("Normalized Performance Comparison")
-    improve_chart_readability(fig, height=450, extra_top=72, extra_right=95, x_title="Date", y_title="Normalized Performance (Start = 100)", legend_title="Ticker / Benchmark")
+        return labeled_empty_figure("Normalized Performance Comparison", "Date", "Normalized Performance (Start = 100)")
     fig.update_layout(title="Normalized Performance Comparison")
-    return fig
+    return apply_chart_theme(fig, height=450, xaxis_title="Date", yaxis_title="Normalized Performance (Start = 100)", legend_title="Ticker / Benchmark", top=82, bottom=82, left=96, right=64)
 
 
 def make_drawdown_chart(tickers: List[str], online_data: Dict[str, Dict[str, Any]]) -> go.Figure:
@@ -1393,11 +1538,10 @@ def make_drawdown_chart(tickers: List[str], online_data: Dict[str, Dict[str, Any
         fig.add_trace(go.Scatter(x=data["Date"], y=data["Drawdown"], mode="lines", name=ticker, hovertemplate="Date: %{x|%Y-%m-%d}<br>Drawdown: %{y:.2%}<extra></extra>"))
         used = True
     if not used:
-        return empty_figure("Drawdown Chart")
-    improve_chart_readability(fig, height=450, extra_top=72, extra_right=95, x_title="Date", y_title="Drawdown (%)", legend_title="Ticker")
+        return labeled_empty_figure("Drawdown Chart", "Date", "Drawdown (%)")
     fig.update_layout(title="Drawdown Chart")
-    fig.update_yaxes(tickformat=".1%")
-    return fig
+    fig.update_yaxes(tickformat=".1%", zeroline=True)
+    return apply_chart_theme(fig, height=450, xaxis_title="Date", yaxis_title="Drawdown (%)", legend_title="Ticker", top=82, bottom=82, left=92, right=64)
 
 # ============================================================
 # Render helpers
@@ -1424,7 +1568,7 @@ def render_version_banner() -> None:
 
 def render_header(last_refresh: str) -> None:
     st.markdown(f"<div class='dashboard-title'>{APP_TITLE}</div>", unsafe_allow_html=True)
-    st.markdown("<div class='dashboard-subtitle'>Household-level wealth tracker for ETF portfolios, BUY/SELL FIFO, actual dividends, and multi-account views.</div>", unsafe_allow_html=True)
+    st.markdown("<div class='dashboard-subtitle'>Household-level wealth tracker for investment holdings, BUY/SELL FIFO, actual dividends, and multi-account views.</div>", unsafe_allow_html=True)
     st.markdown(f"""
         <div class="meta-box">
             <b>Portfolio Source:</b> {st.session_state.get('portfolio_source', 'unknown')} &nbsp; | &nbsp;
@@ -1438,85 +1582,77 @@ def render_header(last_refresh: str) -> None:
     """, unsafe_allow_html=True)
 
 
-POSITIVE_TEXT = "color: #15803d; font-weight: 700;"
-NEGATIVE_TEXT = "color: #dc2626; font-weight: 700;"
-BLUE_TEXT = "color: #2563eb; font-weight: 700;"
-AMBER_TEXT = "color: #d97706; font-weight: 700;"
-GRAY_TEXT = "color: #64748b; font-weight: 700;"
-PURPLE_TEXT = "color: #7c3aed; font-weight: 700;"
-RED_TEXT = "color: #b91c1c; font-weight: 800;"
-DARK_TEXT = "color: #0f172a; font-weight: 700;"
-LIGHT_GRAY_TEXT = "color: #94a3b8; font-weight: 700;"
-
-
-def _numeric_value(value: Any) -> Optional[float]:
+def cell_color_style(value: Any) -> str:
+    palette = hwt_palette()
     try:
         if value is None or pd.isna(value):
-            return None
-        return float(value)
+            return f"color: {palette['muted']};"
+        if isinstance(value, str):
+            text = value.strip().lower()
+            if text in {"active", "confirmed", "buy"}:
+                return f"color: {palette['positive']}; font-weight: 800;"
+            if text in {"closed", "sell", "error"}:
+                return f"color: {palette['negative']}; font-weight: 800;"
+            if "estimated" in text or text == "warning":
+                return f"color: {palette['estimated']}; font-weight: 800;"
+            if "unknown" in text or "no dividend" in text or text == "info":
+                return f"color: {palette['muted']}; font-weight: 800;"
+        numeric = float(value)
+        if numeric > 0:
+            return f"color: {palette['positive']}; font-weight: 800;"
+        if numeric < 0:
+            return f"color: {palette['negative']}; font-weight: 800;"
     except Exception:
-        return None
+        pass
+    return f"color: {palette['text']};"
 
 
-def table_cell_style(value: Any, column: str) -> str:
-    low = str(column).lower()
-    text = "" if value is None or pd.isna(value) else str(value).strip()
-    text_low = text.lower()
-
-    if low == "severity":
-        if text_low == "error":
-            return RED_TEXT
-        if text_low == "warning":
-            return AMBER_TEXT
-        if text_low == "info":
-            return BLUE_TEXT
-        return GRAY_TEXT
-
-    if any(k in low for k in ["status", "confidence", "type", "tax_bucket", "owner"]):
-        if text_low in {"active", "confirmed", "buy", "retirement", "me"}:
-            return POSITIVE_TEXT if text_low != "buy" else BLUE_TEXT
-        if text_low in {"sell", "estimated", "taxable", "warning"}:
-            return AMBER_TEXT
-        if text_low in {"closed", "unknown", "no dividend history", "excluded - closed", "unclassified", "inactive"}:
-            return GRAY_TEXT
-        if text_low == "spouse":
-            return PURPLE_TEXT
-
-    if any(k in low for k in ["ticker", "account", "broker"]):
-        return DARK_TEXT
-
-    number = _numeric_value(value)
-    if number is None:
-        return ""
-
-    is_return_col = "%" in column or "return" in low or "yield" in low or "drawdown" in low
-    is_profit_col = any(k in low for k in ["p/l", "difference", "gain", "loss", "return incl"])
-    is_dividend_col = "dividend" in low
-    is_money_col = any(k in low for k in ["value", "cost", "price", "amount", "basis", "proceeds", "dividend"])
-
-    if is_profit_col or is_return_col:
-        if number > 0:
-            return POSITIVE_TEXT
-        if number < 0:
-            return NEGATIVE_TEXT
-        return GRAY_TEXT
-
-    if is_dividend_col:
-        return BLUE_TEXT
-
-    if is_money_col:
-        return DARK_TEXT
-
-    return ""
+def table_cell_style_by_column(value: Any, column_name: str) -> str:
+    palette = hwt_palette()
+    low = str(column_name).lower()
+    if any(k in low for k in ["p/l", "return", "yield", "drawdown"]):
+        return cell_color_style(value)
+    if "dividend" in low or "amount" in low:
+        return f"color: {palette['dividend']}; font-weight: 800;"
+    if "status" in low or low in {"severity", "transaction_type"}:
+        return cell_color_style(value)
+    if low in {"ticker", "account_id", "account name", "account_name", "owner", "tax_bucket"}:
+        return f"color: {palette['text']}; font-weight: 800;"
+    return f"color: {palette['text']};"
 
 
-def style_dataframe(df: pd.DataFrame, *, formatters: Optional[Dict[str, Any]] = None):
+def style_dataframe_for_display(df: pd.DataFrame, formatters: Optional[Dict[str, Any]] = None) -> Any:
+    palette = hwt_palette()
     styler = df.style
     if formatters:
         styler = styler.format(formatters)
-    for col in df.columns:
-        styler = styler.map(lambda v, c=col: table_cell_style(v, c), subset=[col])
-    return styler
+    styler = styler.set_table_styles([
+        {"selector": "th", "props": [("background-color", palette["table_header_bg"]), ("color", palette["text"]), ("font-weight", "850"), ("border-bottom", f"1px solid {palette['border']}"), ("white-space", "nowrap")]},
+        {"selector": "td", "props": [("color", palette["text"]), ("border-bottom", f"1px solid {palette['border']}")]},
+        {"selector": "tbody tr:nth-child(even)", "props": [("background-color", palette["table_alt_bg"])]},
+        {"selector": "tbody tr:nth-child(odd)", "props": [("background-color", palette["table_row_bg"])]},
+    ])
+    def _style_col(col: pd.Series) -> List[str]:
+        return [table_cell_style_by_column(v, col.name) for v in col]
+    return styler.apply(_style_col, axis=0)
+
+
+def format_dataframe_for_native_display(df: pd.DataFrame, formatters: Optional[Dict[str, Any]] = None) -> pd.DataFrame:
+    """Return a display-only copy for native st.dataframe rendering.
+
+    Native st.dataframe automatically follows Streamlit Light/Dark text colors.
+    This avoids stale bright text caused by Pandas Styler hard-coded colors.
+    """
+    out = df.copy()
+    if formatters:
+        for col, formatter in formatters.items():
+            if col in out.columns:
+                out[col] = out[col].map(formatter)
+    for col in out.columns:
+        low = str(col).lower()
+        if "date" in low:
+            out[col] = out[col].map(fmt_date)
+    return out
 
 
 def style_money_table(df: pd.DataFrame, height: int = 430) -> None:
@@ -1528,18 +1664,20 @@ def style_money_table(df: pd.DataFrame, height: int = 430) -> None:
         low = c.lower()
         if any(k in low for k in ["value", "cost", "price", "p/l", "dividend", "proceeds", "amount", "basis"]):
             formatters[c] = fmt_currency
-        if "%" in c or "yield" in low or ("return" in low and c.endswith("%")):
+        if "%" in c or "yield" in low or ("return" in low and c.endswith("%")) or "weight" in low:
             formatters[c] = fmt_pct
         if "shares" in low:
             formatters[c] = lambda v: fmt_number(v, 4)
-    st.dataframe(style_dataframe(df, formatters=formatters), use_container_width=True, height=height)
+    display_df = format_dataframe_for_native_display(df, formatters)
+    st.dataframe(display_df, use_container_width=True, height=height)
 
 
-def style_data_quality_table(df: pd.DataFrame, height: int = 360) -> None:
+def style_quality_table(df: pd.DataFrame, height: int = 360) -> None:
     if df is None or df.empty:
-        st.success("No data quality issues detected.")
+        st.success("No data quality issues found.")
         return
-    st.dataframe(style_dataframe(df), use_container_width=True, height=height)
+    styler = style_dataframe_for_display(df)
+    st.dataframe(styler, use_container_width=True, height=height)
 
 # ============================================================
 # Sidebar and session controls
@@ -1553,6 +1691,16 @@ def render_sidebar(accounts_clean: pd.DataFrame, tx_clean: pd.DataFrame) -> Dict
         st.session_state.last_online_refresh = now_et_str()
         st.rerun()
     st.sidebar.caption(f"{CREATOR_NAME} · {APP_VERSION}")
+    theme_options = ["Auto", "Light", "Dark"]
+    current_theme_mode = st.session_state.get("display_theme_mode", "Auto")
+    if current_theme_mode not in theme_options:
+        current_theme_mode = "Auto"
+    st.session_state.display_theme_mode = st.sidebar.selectbox(
+        "Chart/Table Text Contrast",
+        theme_options,
+        index=theme_options.index(current_theme_mode),
+        help="Auto follows Streamlit theme when exposed. Choose Light or Dark if chart/table text contrast does not match the browser mode.",
+    )
 
     with st.sidebar.expander("CSV Sources", expanded=True):
         uploaded_accounts = st.file_uploader("Upload accounts.csv", type=["csv"], key="accounts_uploader")
@@ -1697,7 +1845,7 @@ def render_overview(holdings: pd.DataFrame, realized_df: pd.DataFrame, dividends
 
     a, b = st.columns(2)
     with a:
-        st.plotly_chart(make_allocation_chart(holdings, "Ticker", "Allocation by ETF"), use_container_width=True, key="overview_allocation_etf")
+        st.plotly_chart(make_allocation_chart(holdings, "Ticker", "Allocation by Ticker"), use_container_width=True, key="overview_allocation_ticker")
     with b:
         st.plotly_chart(make_allocation_chart(holdings, "tax_bucket", "Allocation by Tax Bucket"), use_container_width=True, key="overview_allocation_tax")
     c, d = st.columns(2)
@@ -1706,7 +1854,7 @@ def render_overview(holdings: pd.DataFrame, realized_df: pd.DataFrame, dividends
     with d:
         st.plotly_chart(make_upcoming_dividend_chart(upcoming, 30), use_container_width=True, key="overview_upcoming_dividends")
 
-    st.markdown("### Household ETF Exposure")
+    st.markdown("### Household Holding Exposure")
     style_money_table(exp, height=320)
 
 
@@ -1738,7 +1886,7 @@ def render_holdings_tab(holdings: pd.DataFrame, show_closed: bool) -> None:
     ]
     cols = [c for c in cols if c in display.columns]
     style_money_table(display[cols] if not display.empty else display, height=560)
-    st.markdown("### Cross-Account ETF Exposure")
+    st.markdown("### Cross-Account Holding Exposure")
     style_money_table(exposure_by_ticker(holdings), height=360)
 
 
@@ -1781,7 +1929,7 @@ def render_dividend_tab(holdings: pd.DataFrame, dividends: pd.DataFrame, upcomin
         by_ticker = pd.DataFrame()
         div_enriched = pd.DataFrame()
     with c3:
-        st.plotly_chart(make_bar_chart(by_ticker, "Ticker", "Actual Dividends", "Actual Dividends by ETF"), use_container_width=True, key="div_by_ticker")
+        st.plotly_chart(make_bar_chart(by_ticker, "Ticker", "Actual Dividends", "Actual Dividends by Ticker"), use_container_width=True, key="div_by_ticker")
     with c4:
         if not div_enriched.empty and "account_name" in div_enriched.columns:
             by_account = div_enriched.groupby("account_name", as_index=False)["net_amount"].sum().rename(columns={"account_name": "Account", "net_amount": "Actual Dividends"})
@@ -1797,7 +1945,7 @@ def render_dividend_tab(holdings: pd.DataFrame, dividends: pd.DataFrame, upcomin
         st.plotly_chart(make_monthly_estimated_dividend_calendar(upcoming), use_container_width=True, key="div_monthly_estimated")
     with c6:
         est = holdings[holdings["Holding Status"] == "Active"].groupby("Ticker", as_index=False)["Estimated Annual Dividend"].sum() if holdings is not None and not holdings.empty else pd.DataFrame()
-        st.plotly_chart(make_bar_chart(est, "Ticker", "Estimated Annual Dividend", "Estimated Annual Dividend by ETF"), use_container_width=True, key="div_est_by_ticker")
+        st.plotly_chart(make_bar_chart(est, "Ticker", "Estimated Annual Dividend", "Estimated Annual Dividend by Ticker"), use_container_width=True, key="div_est_by_ticker")
     st.markdown("### Upcoming Estimated Dividend Table")
     style_money_table(upcoming, height=320)
 
@@ -1824,7 +1972,7 @@ def render_price_tab(transactions: pd.DataFrame, holdings: pd.DataFrame, online_
     if not tickers:
         st.info("No tickers available.")
         return
-    selected = st.selectbox("Selected ETF", tickers)
+    selected = st.selectbox("Selected Ticker", tickers)
     st.plotly_chart(make_price_chart(selected, online_data, transactions, holdings), use_container_width=True, key="price_selected_chart")
     st.plotly_chart(make_normalized_chart(tickers, online_data, benchmark), use_container_width=True, key="price_normalized_chart")
     st.plotly_chart(make_drawdown_chart(tickers, online_data), use_container_width=True, key="price_drawdown_chart")
@@ -1844,7 +1992,7 @@ def render_data_manager(accounts_clean: pd.DataFrame, tx_clean: pd.DataFrame, di
         qc1.metric("Errors", dq_errors)
         qc2.metric("Warnings", dq_warnings)
         qc3.metric("Info", dq_infos)
-        style_data_quality_table(data_quality, height=360)
+        style_quality_table(data_quality, height=360)
     st.markdown("---")
     st.markdown("### Accounts Manager")
     st.code("account_id,owner,account_name,broker,account_type,tax_bucket,currency,is_active,note", language="text")
