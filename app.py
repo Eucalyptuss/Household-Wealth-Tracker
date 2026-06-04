@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import html
 import io
 import math
 from collections import defaultdict, deque
@@ -22,7 +23,7 @@ from zoneinfo import ZoneInfo
 
 APP_TITLE = "Household Wealth Tracker"
 CREATOR_NAME = "Eucalyptuss"
-APP_VERSION = "1.0.8"
+APP_VERSION = "1.0.11"
 BASE_DIR = Path(__file__).resolve().parent
 ET = ZoneInfo("America/New_York")
 TODAY = datetime.now(ET).date()
@@ -163,6 +164,46 @@ def inject_css() -> None:
         [data-testid="stSidebar"] .stCaptionContainer, [data-testid="stSidebar"] small { color: var(--hwt-muted) !important; }
         .hwt-muted-text { color: var(--hwt-muted) !important; }
         .hwt-table-note { color: var(--hwt-muted) !important; font-size: 0.86rem; }
+        .hwt-table-wrap {
+            width: 100%;
+            overflow: auto;
+            border: 1px solid var(--hwt-border);
+            border-radius: 12px;
+            background: var(--hwt-bg);
+        }
+        table.hwt-table {
+            width: 100%;
+            border-collapse: collapse;
+            font-size: 0.88rem;
+            color: var(--hwt-text);
+        }
+        table.hwt-table th {
+            position: sticky;
+            top: 0;
+            z-index: 2;
+            background: var(--hwt-soft-bg);
+            color: var(--hwt-text);
+            font-weight: 850;
+            text-align: left;
+            white-space: nowrap;
+            padding: 0.55rem 0.65rem;
+            border-bottom: 1px solid var(--hwt-border);
+        }
+        table.hwt-table td {
+            color: var(--hwt-text);
+            padding: 0.50rem 0.65rem;
+            border-bottom: 1px solid var(--hwt-border);
+            white-space: nowrap;
+            vertical-align: middle;
+        }
+        table.hwt-table tr:nth-child(even) td { background: color-mix(in srgb, var(--hwt-soft-bg) 55%, transparent); }
+        table.hwt-table .hwt-pos { color: #16A34A !important; font-weight: 850; }
+        table.hwt-table .hwt-neg { color: #DC2626 !important; font-weight: 850; }
+        table.hwt-table .hwt-blue { color: #2563EB !important; font-weight: 850; }
+        table.hwt-table .hwt-strong { font-weight: 850; }
+        .kpi-value.positive { color: #16A34A !important; }
+        .kpi-value.negative { color: #DC2626 !important; }
+        .kpi-value.blue { color: #2563EB !important; }
         </style>
         """,
         unsafe_allow_html=True,
@@ -1218,13 +1259,14 @@ def apply_chart_theme(
     left: int = 84,
     right: int = 54,
 ) -> go.Figure:
-    """Apply layout spacing while letting Streamlit/browser theme control text.
+    """Apply layout spacing without forcing general chart text colors.
 
-    The previous implementation selected concrete light/dark text colors in Python.
-    That can become stale when the user changes Streamlit theme in the browser. Use
-    CSS variables for Plotly text so chart labels follow the active app theme.
+    Streamlit already applies its active Light/Dark theme to Plotly charts. Do not
+    override all chart text with hard-coded or session-derived colors. Only chart
+    geometry, margins, transparent backgrounds, grid lines, and axis labels are
+    managed here. Red/green/blue emphasis is applied only in chart/table content
+    where the value itself needs semantic highlighting.
     """
-    theme_text = "var(--text-color, #111827)"
     theme_grid = "rgba(128, 128, 128, 0.24)"
     fig.update_layout(
         height=height,
@@ -1235,19 +1277,11 @@ def apply_chart_theme(
         yaxis_title=yaxis_title,
         legend_title_text=legend_title,
         hovermode="closest",
-        font=dict(color=theme_text),
-        title=dict(font=dict(color=theme_text)),
-        legend=dict(
-            font=dict(color=theme_text),
-            title=dict(font=dict(color=theme_text)),
-            bgcolor="rgba(0,0,0,0)",
-        ),
+        legend=dict(bgcolor="rgba(0,0,0,0)"),
     )
     fig.update_xaxes(
         automargin=True,
         title_standoff=18,
-        tickfont=dict(color=theme_text),
-        title_font=dict(color=theme_text),
         gridcolor=theme_grid,
         zerolinecolor=theme_grid,
         linecolor=theme_grid,
@@ -1255,17 +1289,11 @@ def apply_chart_theme(
     fig.update_yaxes(
         automargin=True,
         title_standoff=18,
-        tickfont=dict(color=theme_text),
-        title_font=dict(color=theme_text),
         gridcolor=theme_grid,
         zerolinecolor=theme_grid,
         linecolor=theme_grid,
     )
-    fig.update_traces(textfont=dict(color=theme_text))
-    for annotation in fig.layout.annotations or []:
-        annotation.font = dict(color=theme_text)
     return fig
-
 
 def apply_bar_label_safety(fig: go.Figure, values: Iterable[Any], *, orientation: str = "v", zero_floor: bool = True) -> go.Figure:
     """Keep bar labels inside the visible plotting area by adding axis headroom.
@@ -1283,7 +1311,7 @@ def empty_figure(title: str) -> go.Figure:
     fig = go.Figure()
     fig.update_layout(
         title=title,
-        annotations=[{"text": "No data available", "showarrow": False, "xref": "paper", "yref": "paper", "x": 0.5, "y": 0.5, "font": {"color": "var(--text-color, #111827)"}}],
+        annotations=[{"text": "No data available", "showarrow": False, "xref": "paper", "yref": "paper", "x": 0.5, "y": 0.5}],
     )
     return apply_chart_theme(fig, height=360, top=64, bottom=64, left=72, right=42)
 
@@ -1498,10 +1526,8 @@ def make_price_chart(ticker: str, online_data: Dict[str, Dict[str, Any]], transa
         fig.add_hline(
             y=avg,
             line_dash="dash",
-            line_color="var(--text-color, #111827)",
             annotation_text="Avg Open Cost",
             annotation_position="top left",
-            annotation_font_color="var(--text-color, #111827)",
         )
     fig.update_layout(title=f"{ticker} Price Trend with BUY/SELL Markers")
     return apply_chart_theme(fig, height=540, xaxis_title="Date", yaxis_title="Price ($)", legend_title="Price / Transaction", top=86, bottom=82, left=92, right=72)
@@ -1582,67 +1608,137 @@ def render_header(last_refresh: str) -> None:
     """, unsafe_allow_html=True)
 
 
-def cell_color_style(value: Any) -> str:
-    palette = hwt_palette()
+def _semantic_class(value: Any, column_name: str) -> str:
+    """Return a semantic CSS class only when the cell should be highlighted.
+
+    Base table text is left to Streamlit/CSS theme variables. Only values with
+    clear financial or status meaning get red/green/blue classes.
+    """
+    low = str(column_name).lower()
     try:
         if value is None or pd.isna(value):
-            return f"color: {palette['muted']};"
-        if isinstance(value, str):
-            text = value.strip().lower()
-            if text in {"active", "confirmed", "buy"}:
-                return f"color: {palette['positive']}; font-weight: 800;"
-            if text in {"closed", "sell", "error"}:
-                return f"color: {palette['negative']}; font-weight: 800;"
-            if "estimated" in text or text == "warning":
-                return f"color: {palette['estimated']}; font-weight: 800;"
-            if "unknown" in text or "no dividend" in text or text == "info":
-                return f"color: {palette['muted']}; font-weight: 800;"
-        numeric = float(value)
-        if numeric > 0:
-            return f"color: {palette['positive']}; font-weight: 800;"
-        if numeric < 0:
-            return f"color: {palette['negative']}; font-weight: 800;"
+            return ""
     except Exception:
         pass
-    return f"color: {palette['text']};"
+
+    if isinstance(value, str):
+        text = value.strip().lower()
+        if low == "severity":
+            if text == "error":
+                return "hwt-neg"
+            if text == "info":
+                return "hwt-blue"
+            return ""
+        if low in {"transaction_type", "type"}:
+            if text == "buy":
+                return "hwt-pos"
+            if text == "sell":
+                return "hwt-neg"
+            return ""
+        if "status" in low:
+            if text in {"active", "confirmed"}:
+                return "hwt-pos"
+            if text in {"closed", "error"}:
+                return "hwt-neg"
+            if "dividend" in text:
+                return "hwt-blue"
+            return ""
+
+    if any(k in low for k in ["p/l", "return", "drawdown", "difference"]):
+        try:
+            numeric = float(value)
+            if numeric > 0:
+                return "hwt-pos"
+            if numeric < 0:
+                return "hwt-neg"
+        except Exception:
+            return ""
+        return ""
+
+    if (
+        "dividend" in low
+        or "yield" in low
+        or low in {"net_amount", "actual dividends", "estimated annual dividend"}
+        or "estimated dividend" in low
+    ):
+        try:
+            numeric = float(value)
+            if numeric != 0:
+                return "hwt-blue"
+        except Exception:
+            if not _is_blank_like(value):
+                return "hwt-blue"
+        return ""
+
+    return ""
 
 
-def table_cell_style_by_column(value: Any, column_name: str) -> str:
-    palette = hwt_palette()
+def _display_value(value: Any, formatter: Optional[Any] = None, column_name: str = "") -> str:
+    if formatter is not None:
+        try:
+            return str(formatter(value))
+        except Exception:
+            pass
     low = str(column_name).lower()
-    if any(k in low for k in ["p/l", "return", "yield", "drawdown"]):
-        return cell_color_style(value)
-    if "dividend" in low or "amount" in low:
-        return f"color: {palette['dividend']}; font-weight: 800;"
-    if "status" in low or low in {"severity", "transaction_type"}:
-        return cell_color_style(value)
-    if low in {"ticker", "account_id", "account name", "account_name", "owner", "tax_bucket"}:
-        return f"color: {palette['text']}; font-weight: 800;"
-    return f"color: {palette['text']};"
+    if "date" in low:
+        return fmt_date(value)
+    if value is None:
+        return ""
+    try:
+        if pd.isna(value):
+            return ""
+    except Exception:
+        pass
+    if isinstance(value, float):
+        return fmt_number(value, 4) if abs(value) < 1 and value != 0 else fmt_number(value, 2)
+    return str(value)
+
+
+def render_semantic_table(df: pd.DataFrame, formatters: Optional[Dict[str, Any]] = None, height: int = 430) -> None:
+    """Render a theme-aware HTML table with semantic-only color highlights.
+
+    Streamlit's canvas dataframe renderer can ignore Pandas Styler text color in
+    some versions. This renderer uses normal HTML so red/green/blue highlights
+    are applied reliably, while all unhighlighted text inherits the active
+    Streamlit light/dark theme.
+    """
+    if df is None or df.empty:
+        st.info("No data available.")
+        return
+
+    formatters = formatters or {}
+    columns = list(df.columns)
+    max_height = max(int(height), 180)
+    parts = [f"<div class='hwt-table-wrap' style='max-height:{max_height}px;'>", "<table class='hwt-table'>", "<thead><tr>"]
+    for col in columns:
+        parts.append(f"<th>{html.escape(str(col))}</th>")
+    parts.append("</tr></thead><tbody>")
+
+    for _, row in df.iterrows():
+        parts.append("<tr>")
+        for col in columns:
+            raw = row[col]
+            cls = _semantic_class(raw, col)
+            if str(col).lower() in {"ticker", "account id", "account_id", "account", "account name", "account_name", "owner", "tax_bucket"}:
+                cls = (cls + " hwt-strong").strip()
+            display = _display_value(raw, formatters.get(col), col)
+            class_attr = f" class='{cls}'" if cls else ""
+            parts.append(f"<td{class_attr}>{html.escape(display)}</td>")
+        parts.append("</tr>")
+    parts.append("</tbody></table></div>")
+    st.markdown("".join(parts), unsafe_allow_html=True)
 
 
 def style_dataframe_for_display(df: pd.DataFrame, formatters: Optional[Dict[str, Any]] = None) -> Any:
-    palette = hwt_palette()
+    """Backward-compatible helper retained for any remaining direct calls."""
     styler = df.style
     if formatters:
         styler = styler.format(formatters)
-    styler = styler.set_table_styles([
-        {"selector": "th", "props": [("background-color", palette["table_header_bg"]), ("color", palette["text"]), ("font-weight", "850"), ("border-bottom", f"1px solid {palette['border']}"), ("white-space", "nowrap")]},
-        {"selector": "td", "props": [("color", palette["text"]), ("border-bottom", f"1px solid {palette['border']}")]},
-        {"selector": "tbody tr:nth-child(even)", "props": [("background-color", palette["table_alt_bg"])]},
-        {"selector": "tbody tr:nth-child(odd)", "props": [("background-color", palette["table_row_bg"])]},
-    ])
-    def _style_col(col: pd.Series) -> List[str]:
-        return [table_cell_style_by_column(v, col.name) for v in col]
-    return styler.apply(_style_col, axis=0)
+    return styler
 
 
 def format_dataframe_for_native_display(df: pd.DataFrame, formatters: Optional[Dict[str, Any]] = None) -> pd.DataFrame:
-    """Return a display-only copy for native st.dataframe rendering.
-
-    Native st.dataframe automatically follows Streamlit Light/Dark text colors.
-    This avoids stale bright text caused by Pandas Styler hard-coded colors.
-    """
+    """Return a display-only copy for native st.dataframe rendering."""
     out = df.copy()
     if formatters:
         for col, formatter in formatters.items():
@@ -1668,16 +1764,14 @@ def style_money_table(df: pd.DataFrame, height: int = 430) -> None:
             formatters[c] = fmt_pct
         if "shares" in low:
             formatters[c] = lambda v: fmt_number(v, 4)
-    display_df = format_dataframe_for_native_display(df, formatters)
-    st.dataframe(display_df, use_container_width=True, height=height)
+    render_semantic_table(df, formatters=formatters, height=height)
 
 
 def style_quality_table(df: pd.DataFrame, height: int = 360) -> None:
     if df is None or df.empty:
         st.success("No data quality issues found.")
         return
-    styler = style_dataframe_for_display(df)
-    st.dataframe(styler, use_container_width=True, height=height)
+    render_semantic_table(df, height=height)
 
 # ============================================================
 # Sidebar and session controls
