@@ -24,7 +24,7 @@ from zoneinfo import ZoneInfo
 
 APP_TITLE = "Household Wealth Tracker"
 CREATOR_NAME = "Eucalyptuss"
-APP_VERSION = "1.0.13"
+APP_VERSION = "1.0.15"
 BASE_DIR = Path(__file__).resolve().parent
 ET = ZoneInfo("America/New_York")
 TODAY = datetime.now(ET).date()
@@ -1340,6 +1340,38 @@ def _short_label(value: Any, max_len: int = 24) -> str:
     return text if len(text) <= max_len else text[: max_len - 1] + "…"
 
 
+def compact_account_id(value: Any, max_len: int = 16) -> str:
+    """Return a readable short label for an account_id while preserving the full value in hover text.
+
+    Examples:
+    - ME_FID_ROTH -> ME_FID_ROTH
+    - PERSONAL_FIDELITY_ROTH_IRA -> PERSONAL…IRA
+    """
+    text = str(value).strip() if not _is_blank_like(value) else "Unknown"
+    if len(text) <= max_len:
+        return text
+    normalized = text.replace("-", "_").replace("/", "_").replace(" ", "_")
+    parts = [p for p in normalized.split("_") if p]
+
+    if len(parts) >= 3:
+        middle_initials = "".join(p[0] for p in parts[1:-1] if p)
+        candidate = f"{parts[0]}_{middle_initials}_{parts[-1]}"
+        if len(candidate) <= max_len:
+            return candidate
+
+    if len(parts) >= 2:
+        first = parts[0][: max(3, min(6, max_len // 2))]
+        last_room = max_len - len(first) - 1
+        last = parts[-1][-max(4, last_room):]
+        candidate = f"{first}…{last}"
+        if len(candidate) <= max_len:
+            return candidate
+
+    front = max(4, (max_len - 1) // 2)
+    back = max(4, max_len - front - 1)
+    return f"{text[:front]}…{text[-back:]}"
+
+
 def _pie_texttemplate(field: str, show_account_count: bool = False) -> str:
     if field == "Ticker":
         account_count_line = "<br>%{customdata[1]:,.0f} acct" if show_account_count else ""
@@ -1517,31 +1549,82 @@ def make_bar_chart(df: pd.DataFrame, x: str, y: str, title: str, color: Optional
     return apply_chart_theme(fig, height=430, xaxis_title=chart_label(x), yaxis_title=chart_label(y), legend_title=legend_title, top=84, bottom=88, left=92, right=60)
 
 
-def make_top_movers_chart(holdings: pd.DataFrame) -> go.Figure:
-    if holdings is None or holdings.empty:
-        return labeled_empty_figure("Top Gainers / Losers", "Return (%)", "Ticker / Account ID")
-    active = holdings[holdings["Holding Status"] == "Active"].copy()
+def top_movers_data(holdings: pd.DataFrame) -> pd.DataFrame:
+    """Return all active account_id-level positions for the overview gain/loss chart.
+
+    Earlier versions used only nlargest(5) + nsmallest(5), which intentionally
+    dropped middle-return positions. The chart now shows every active
+    Ticker + Account ID row so no account-level holding is hidden.
+    """
+    if holdings is None or holdings.empty or "Return %" not in holdings.columns:
+        return pd.DataFrame()
+
+    active = holdings[holdings["Holding Status"] == "Active"].copy() if "Holding Status" in holdings.columns else holdings.copy()
     if active.empty:
-        return labeled_empty_figure("Top Gainers / Losers", "Return (%)", "Ticker / Account ID")
-    top = pd.concat([active.nlargest(5, "Return %"), active.nsmallest(5, "Return %")]).drop_duplicates()
-    top = top.sort_values("Return %")
-    top["Ticker / Account ID"] = top.apply(
-        lambda r: f"{r.get('Ticker', '')} · {_short_label(r.get('Account ID', ''), 28)}",
-        axis=1,
-    )
+        return pd.DataFrame()
+
+    active["Return %"] = pd.to_numeric(active["Return %"], errors="coerce")
+    active["Market Value"] = pd.to_numeric(active.get("Market Value", 0.0), errors="coerce").fillna(0.0)
+    active["Unrealized P/L"] = pd.to_numeric(active.get("Unrealized P/L", 0.0), errors="coerce").fillna(0.0)
+    active = active.dropna(subset=["Return %"])
+    if active.empty:
+        return pd.DataFrame()
+
+    sort_cols = [c for c in ["Return %", "Ticker", "Account ID"] if c in active.columns]
+    return active.sort_values(sort_cols, ascending=[True] + [True] * (len(sort_cols) - 1)).reset_index(drop=True)
+
+
+def top_movers_chart_height(holdings: pd.DataFrame, *, min_height: int = 500, row_height: int = 42, max_height: int = 1600) -> int:
+    """Calculate a shared lower-row chart height from all displayed gain/loss rows."""
+    rows = len(top_movers_data(holdings))
+    if rows <= 0:
+        return min_height
+    return int(min(max_height, max(min_height, 190 + rows * row_height)))
+
+
+def _make_unique_display_labels(labels: Iterable[str]) -> List[str]:
+    """Make short y-axis labels unique without exposing long account IDs on the axis."""
+    seen: Dict[str, int] = defaultdict(int)
+    out: List[str] = []
+    for label in labels:
+        seen[label] += 1
+        out.append(label if seen[label] == 1 else f"{label} #{seen[label]}")
+    return out
+
+
+def make_top_movers_chart(holdings: pd.DataFrame, height: Optional[int] = None) -> go.Figure:
+    chart_height = int(height or top_movers_chart_height(holdings))
+    axis_title = "Ticker / Short Account ID"
+    title = "Top Gainers / Losers by Account ID"
+    if holdings is None or holdings.empty:
+        fig = labeled_empty_figure(title, "Return (%)", axis_title)
+        fig.update_layout(height=chart_height)
+        return fig
+
+    top = top_movers_data(holdings)
+    if top.empty:
+        fig = labeled_empty_figure(title, "Return (%)", axis_title)
+        fig.update_layout(height=chart_height)
+        return fig
+
+    top["Short Account ID"] = top["Account ID"].map(lambda v: compact_account_id(v, 16)) if "Account ID" in top.columns else "Unknown"
+    base_labels = top.apply(lambda r: f"{r.get('Ticker', '')} · {r.get('Short Account ID', '')}", axis=1).tolist()
+    top["Ticker / Short Account ID"] = _make_unique_display_labels(base_labels)
+
     fig = px.bar(
         top,
         x="Return %",
-        y="Ticker / Account ID",
-        color="Account ID" if "Account ID" in top.columns else None,
+        y="Ticker / Short Account ID",
+        color="Short Account ID" if "Short Account ID" in top.columns else None,
         orientation="h",
-        custom_data=["Ticker", "Account ID", "Market Value", "Unrealized P/L"],
+        custom_data=["Ticker", "Account ID", "Short Account ID", "Market Value", "Unrealized P/L"],
         text="Return %",
-        title="Top Gainers / Losers by Account ID",
+        title=title,
         labels={
             "Return %": "Return (%)",
-            "Ticker / Account ID": "Ticker / Account ID",
-            "Account ID": "Account ID",
+            "Ticker / Short Account ID": "Ticker / Short Account ID",
+            "Short Account ID": "Account ID",
+            "Account ID": "Full Account ID",
             "Market Value": "Market Value ($)",
             "Unrealized P/L": "Unrealized P/L ($)",
         },
@@ -1553,14 +1636,16 @@ def make_top_movers_chart(holdings: pd.DataFrame) -> go.Figure:
         hovertemplate=(
             "Ticker: %{customdata[0]}<br>"
             "Account ID: %{customdata[1]}<br>"
+            "Short Account ID: %{customdata[2]}<br>"
             "Return: %{x:.2%}<br>"
-            "Market Value: $%{customdata[2]:,.2f}<br>"
-            "Unrealized P/L: $%{customdata[3]:,.2f}<extra></extra>"
+            "Market Value: $%{customdata[3]:,.2f}<br>"
+            "Unrealized P/L: $%{customdata[4]:,.2f}<extra></extra>"
         ),
     )
     fig = apply_bar_label_safety(fig, top["Return %"], orientation="h", zero_floor=False)
     fig.update_xaxes(tickformat=".1%", zeroline=True)
-    return apply_chart_theme(fig, height=460, xaxis_title="Return (%)", yaxis_title="Ticker / Account ID", legend_title="Account ID", top=84, bottom=76, left=180, right=86)
+    fig.update_yaxes(categoryorder="array", categoryarray=top["Ticker / Short Account ID"].tolist())
+    return apply_chart_theme(fig, height=chart_height, xaxis_title="Return (%)", yaxis_title=axis_title, legend_title="Account ID", top=84, bottom=76, left=150, right=92)
 
 
 def make_realized_chart(realized_df: pd.DataFrame, group: str = "Ticker") -> go.Figure:
@@ -1636,23 +1721,28 @@ def build_upcoming_dividends(holdings: pd.DataFrame, dividend_analysis: Dict[str
     return pd.DataFrame(rows).sort_values("Estimated Ex-Date") if rows else pd.DataFrame()
 
 
-def make_upcoming_dividend_chart(upcoming: pd.DataFrame, days: int = 30) -> go.Figure:
+def make_upcoming_dividend_chart(upcoming: pd.DataFrame, days: int = 30, height: Optional[int] = None) -> go.Figure:
+    chart_height = int(height or 410)
     title = f"Upcoming Estimated Dividends in Next {days} Days"
     if upcoming is None or upcoming.empty:
-        return labeled_empty_figure(title, "Estimated Ex-Date", "Estimated Dividend Amount ($)")
+        fig = labeled_empty_figure(title, "Estimated Ex-Date", "Estimated Dividend Amount ($)")
+        fig.update_layout(height=chart_height)
+        return fig
     data = upcoming.copy()
     data["Estimated Ex-Date"] = pd.to_datetime(data["Estimated Ex-Date"], errors="coerce")
     cutoff = pd.Timestamp(TODAY + timedelta(days=days))
     data = data[(data["Estimated Ex-Date"] >= pd.Timestamp(TODAY)) & (data["Estimated Ex-Date"] <= cutoff)]
     if data.empty:
-        return labeled_empty_figure(title, "Estimated Ex-Date", "Estimated Dividend Amount ($)")
+        fig = labeled_empty_figure(title, "Estimated Ex-Date", "Estimated Dividend Amount ($)")
+        fig.update_layout(height=chart_height)
+        return fig
     grouped = data.groupby("Estimated Ex-Date", as_index=False)["Estimated Dividend Amount"].sum()
     fig = px.bar(grouped, x="Estimated Ex-Date", y="Estimated Dividend Amount", text="Estimated Dividend Amount", title=title, labels={"Estimated Ex-Date": "Estimated Ex-Date", "Estimated Dividend Amount": "Estimated Dividend Amount ($)"})
     fig.update_traces(texttemplate="$%{text:,.2f}", textposition="outside", hovertemplate="Estimated Ex-Date: %{x|%Y-%m-%d}<br>Estimated Dividend Amount: $%{y:,.2f}<extra></extra>")
     fig.update_xaxes(tickformat="%Y-%m-%d")
     fig.update_layout(uniformtext_minsize=10, uniformtext_mode="show")
     fig = apply_bar_label_safety(fig, grouped["Estimated Dividend Amount"], orientation="v", zero_floor=True)
-    return apply_chart_theme(fig, height=410, xaxis_title="Estimated Ex-Date", yaxis_title="Estimated Dividend Amount ($)", top=84, bottom=88, left=92, right=60)
+    return apply_chart_theme(fig, height=chart_height, xaxis_title="Estimated Ex-Date", yaxis_title="Estimated Dividend Amount ($)", top=84, bottom=88, left=92, right=60)
 
 
 def make_monthly_estimated_dividend_calendar(upcoming: pd.DataFrame) -> go.Figure:
@@ -2120,11 +2210,12 @@ def render_overview(holdings: pd.DataFrame, realized_df: pd.DataFrame, dividends
     with bb:
         st.plotly_chart(make_account_allocation_donut_chart(holdings, "tax_bucket", "Account ID-Level Allocation by Tax Bucket"), use_container_width=True, key="overview_account_allocation_tax")
 
+    lower_row_height = top_movers_chart_height(holdings)
     c, d = st.columns(2)
     with c:
-        st.plotly_chart(make_top_movers_chart(holdings), use_container_width=True, key="overview_top_movers")
+        st.plotly_chart(make_top_movers_chart(holdings, height=lower_row_height), use_container_width=True, key="overview_top_movers")
     with d:
-        st.plotly_chart(make_upcoming_dividend_chart(upcoming, 30), use_container_width=True, key="overview_upcoming_dividends")
+        st.plotly_chart(make_upcoming_dividend_chart(upcoming, 30, height=lower_row_height), use_container_width=True, key="overview_upcoming_dividends")
 
     st.markdown("### Household Holding Exposure")
     style_money_table(exp, height=320)
