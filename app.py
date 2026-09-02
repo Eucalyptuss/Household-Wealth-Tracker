@@ -13,6 +13,7 @@ import numpy as np
 import pandas as pd
 import plotly.express as px
 import plotly.graph_objects as go
+from plotly.subplots import make_subplots
 import streamlit as st
 import yfinance as yf
 from zoneinfo import ZoneInfo
@@ -23,7 +24,7 @@ from zoneinfo import ZoneInfo
 
 APP_TITLE = "Household Wealth Tracker"
 CREATOR_NAME = "Eucalyptuss"
-APP_VERSION = "1.0.11"
+APP_VERSION = "1.0.13"
 BASE_DIR = Path(__file__).resolve().parent
 ET = ZoneInfo("America/New_York")
 TODAY = datetime.now(ET).date()
@@ -138,11 +139,11 @@ def inject_css() -> None:
         .version-banner { display: flex; align-items: center; justify-content: space-between; gap: 0.75rem; border: 1px solid light-dark(rgba(29,78,216,0.28), rgba(147,197,253,0.30)); border-radius: 16px; padding: 0.75rem 1rem; background: linear-gradient(135deg, var(--hwt-dividend-bg), var(--hwt-soft-bg)); margin: 0.15rem 0 0.9rem 0; box-shadow: 0 6px 18px rgba(15,23,42,0.06); }
         .version-banner-title { font-weight: 850; color: var(--hwt-text) !important; letter-spacing: -0.01em; }
         .version-banner-meta { color: var(--hwt-muted) !important; font-size: 0.9rem; font-weight: 700; white-space: nowrap; }
-        .kpi-card { color: var(--hwt-text) !important; border: 1px solid var(--hwt-border); border-radius: 18px; padding: 1rem 1rem; background: var(--hwt-card-bg); box-shadow: 0 8px 22px rgba(15,23,42,0.08); height: 150px; min-height: 150px; box-sizing: border-box; display: flex; flex-direction: column; justify-content: space-between; margin-bottom: 0.25rem; }
+        .kpi-card { color: var(--hwt-text) !important; border: 1px solid var(--hwt-border); border-radius: 18px; padding: 1rem 1rem; background: var(--hwt-card-bg); box-shadow: 0 8px 22px rgba(15,23,42,0.08); height: 162px; min-height: 162px; box-sizing: border-box; display: flex; flex-direction: column; justify-content: space-between; margin-bottom: 0.25rem; }
         .kpi-card * { color: inherit; }
         .kpi-row-gap { height: 1.25rem; min-height: 1.25rem; }
         .kpi-label { color: var(--hwt-muted) !important; font-size: 0.80rem; font-weight: 850; text-transform: uppercase; letter-spacing: 0.04em; margin-bottom: 0.45rem; line-height: 1.2; min-height: 1.95rem; }
-        .kpi-value { color: var(--hwt-text) !important; font-size: 1.48rem; line-height: 1.15; font-weight: 850; white-space: nowrap; }
+        .kpi-value { color: var(--hwt-text) !important; font-size: 1.34rem; line-height: 1.18; font-weight: 850; white-space: normal; overflow-wrap: anywhere; }
         .kpi-help { color: var(--hwt-muted) !important; font-size: 0.76rem; margin-top: 0.35rem; line-height: 1.2; min-height: 1.0rem; }
         .positive { color: var(--hwt-positive) !important; }
         .negative { color: var(--hwt-negative) !important; }
@@ -240,6 +241,13 @@ def fmt_pct(value: Any, decimals: int = 2, signed: bool = True) -> str:
         return f"{sign}{float(value) * 100:.{decimals}f}%"
     except Exception:
         return "N/A"
+
+
+def fmt_currency_with_pct(value: Any, pct_value: Any, decimals: int = 2, signed: bool = True) -> str:
+    base = fmt_currency(value, decimals=decimals)
+    if pct_value is None or pd.isna(pct_value):
+        return base
+    return f"{base} ({fmt_pct(pct_value, 2, signed)})"
 
 
 def fmt_date(value: Any) -> str:
@@ -1036,6 +1044,11 @@ def build_portfolio_tables(
     summary["total_return_pct"] = summary["total_pl"] / tracked_cost if tracked_cost else np.nan
     summary["dividend_inclusive_pl"] = summary["total_pl"] + summary["actual_dividends_all_time"]
     summary["dividend_adjusted_return_pct"] = summary["dividend_inclusive_pl"] / tracked_cost if tracked_cost else np.nan
+    summary["unrealized_return_pct"] = summary["unrealized_pl"] / current_open_cost if current_open_cost else np.nan
+    summary["realized_return_pct"] = summary["realized_pl"] / sold_cost_basis if sold_cost_basis else np.nan
+    summary["actual_dividend_ytd_yield"] = summary["actual_dividends_ytd"] / tracked_cost if tracked_cost else np.nan
+    summary["actual_dividend_all_time_yield"] = summary["actual_dividends_all_time"] / tracked_cost if tracked_cost else np.nan
+    summary["estimated_dividend_yield"] = summary["estimated_annual_dividend"] / summary["current_value"] if summary["current_value"] else np.nan
     return tx_detail, realized_enriched, holdings, dividend_analysis, summary
 
 # ============================================================
@@ -1103,8 +1116,8 @@ def exposure_by_ticker(holdings: pd.DataFrame) -> pd.DataFrame:
     if active.empty:
         return pd.DataFrame()
     exp = active.groupby("Ticker", as_index=False).agg({"Shares": "sum", "Market Value": "sum", "Estimated Annual Dividend": "sum"})
-    accounts = active.groupby("Ticker")["account_name"].apply(lambda x: ", ".join(sorted(set(map(str, x))))).reset_index(name="Accounts")
-    exp = exp.merge(accounts, on="Ticker", how="left")
+    account_ids = active.groupby("Ticker")["Account ID"].apply(lambda x: ", ".join(sorted(set(map(str, x))))).reset_index(name="Account IDs")
+    exp = exp.merge(account_ids, on="Ticker", how="left")
     total_mv = exp["Market Value"].sum()
     exp["Household Weight %"] = np.where(total_mv > 0, exp["Market Value"] / total_mv, 0.0)
     return exp.sort_values("Market Value", ascending=False)
@@ -1180,8 +1193,9 @@ CHART_LABELS = {
     "Ticker": "Ticker",
     "account_id": "Account ID",
     "Account ID": "Account ID",
-    "account_name": "Account",
-    "Account": "Account",
+    "Account IDs": "Account IDs",
+    "account_name": "Account Name",
+    "Account": "Account ID",
     "owner": "Owner",
     "tax_bucket": "Tax Bucket",
     "account_type": "Account Type",
@@ -1321,13 +1335,60 @@ def labeled_empty_figure(title: str, xaxis_title: str = "", yaxis_title: str = "
     return apply_chart_theme(fig, height=360, xaxis_title=xaxis_title, yaxis_title=yaxis_title, top=64, bottom=64, left=78, right=42)
 
 
+def _short_label(value: Any, max_len: int = 24) -> str:
+    text = str(value)
+    return text if len(text) <= max_len else text[: max_len - 1] + "…"
+
+
+def _pie_texttemplate(field: str, show_account_count: bool = False) -> str:
+    if field == "Ticker":
+        account_count_line = "<br>%{customdata[1]:,.0f} acct" if show_account_count else ""
+        return f"<b>%{{label}}</b><br>%{{percent}}<br>%{{customdata[0]:,.2f}} sh{account_count_line}"
+    return "<b>%{label}</b><br>%{percent}"
+
+
+def _pie_hovertemplate(field: str, account_label: Optional[str] = None, include_account_count: bool = True) -> str:
+    account_part = "" if account_label is None else f"Account ID: {html.escape(str(account_label))}<br>"
+    if field == "Ticker":
+        account_count_part = "Holding Account IDs: %{customdata[1]:,.0f}<br>" if include_account_count else ""
+        return (
+            account_part
+            + f"{chart_label(field)}: %{{label}}<br>"
+            + "Shares: %{customdata[0]:,.4f}<br>"
+            + account_count_part
+            + "Market Value: $%{value:,.2f}<br>"
+            + "Weight: %{percent}<extra></extra>"
+        )
+    return (
+        account_part
+        + f"{chart_label(field)}: %{{label}}<br>"
+        + "Market Value: $%{value:,.2f}<br>"
+        + "Weight: %{percent}<extra></extra>"
+    )
+
+
 def make_allocation_chart(holdings: pd.DataFrame, field: str = "Ticker", title: str = "Allocation") -> go.Figure:
     if holdings is None or holdings.empty or field not in holdings.columns:
         return labeled_empty_figure(title, chart_label(field), "Market Value ($)")
     active = holdings[holdings["Holding Status"] == "Active"].copy()
     if active.empty:
         return labeled_empty_figure(title, chart_label(field), "Market Value ($)")
-    data = active.groupby(field, as_index=False)["Market Value"].sum().sort_values("Market Value", ascending=False)
+
+    if field == "Ticker" and "Shares" in active.columns:
+        data = (
+            active.groupby(field, as_index=False)
+            .agg({"Market Value": "sum", "Shares": "sum", "Account ID": "nunique"})
+            .rename(columns={"Account ID": "Account Count"})
+            .sort_values("Market Value", ascending=False)
+        )
+        customdata = np.stack([
+            pd.to_numeric(data["Shares"], errors="coerce").fillna(0.0),
+            pd.to_numeric(data["Account Count"], errors="coerce").fillna(0.0),
+        ], axis=-1)
+    else:
+        data = active.groupby(field, as_index=False)["Market Value"].sum().sort_values("Market Value", ascending=False)
+        customdata = None
+
     fig = px.pie(
         data,
         names=field,
@@ -1338,24 +1399,111 @@ def make_allocation_chart(holdings: pd.DataFrame, field: str = "Ticker", title: 
     )
     fig.update_traces(
         textposition="inside",
-        textinfo="percent+label",
-        insidetextorientation="radial",
-        hovertemplate=f"{chart_label(field)}: %{{label}}<br>Market Value: $%{{value:,.2f}}<br>Weight: %{{percent}}<extra></extra>",
+        textinfo="none",
+        texttemplate=_pie_texttemplate(field, show_account_count=(field == "Ticker")),
+        insidetextorientation="horizontal",
+        customdata=customdata,
+        hovertemplate=_pie_hovertemplate(field, include_account_count=(field == "Ticker")),
     )
     fig.update_layout(uniformtext_minsize=10, uniformtext_mode="show")
     return apply_chart_theme(fig, height=420, legend_title=chart_label(field), top=76, bottom=54, left=42, right=78)
 
 
-def make_bar_chart(df: pd.DataFrame, x: str, y: str, title: str) -> go.Figure:
+def make_account_allocation_donut_chart(
+    holdings: pd.DataFrame,
+    field: str = "Ticker",
+    title: str = "Allocation by Account ID",
+    max_accounts: Optional[int] = None,
+) -> go.Figure:
+    """Render account_id-level donut charts for ticker or tax bucket allocation.
+
+    Each donut represents one account_id. Account names are not used as the grouping key,
+    so two accounts with similar display names remain separated by their account_id.
+    """
+    if holdings is None or holdings.empty or field not in holdings.columns or "Account ID" not in holdings.columns:
+        return labeled_empty_figure(title, chart_label(field), "Market Value ($)")
+    active = holdings[holdings["Holding Status"] == "Active"].copy()
+    active = active[pd.to_numeric(active["Market Value"], errors="coerce").fillna(0.0) > 0]
+    if active.empty:
+        return labeled_empty_figure(title, chart_label(field), "Market Value ($)")
+
+    account_order = (
+        active.groupby("Account ID", as_index=False)["Market Value"]
+        .sum()
+        .sort_values("Market Value", ascending=False)["Account ID"]
+        .astype(str)
+        .tolist()
+    )
+    if max_accounts is not None:
+        account_order = account_order[:max_accounts]
+    if not account_order:
+        return labeled_empty_figure(title, chart_label(field), "Market Value ($)")
+
+    cols = 2 if len(account_order) > 1 else 1
+    rows = int(math.ceil(len(account_order) / cols))
+    subplot_titles = [_short_label(account_id, 32) for account_id in account_order]
+    fig = make_subplots(
+        rows=rows,
+        cols=cols,
+        specs=[[{"type": "domain"} for _ in range(cols)] for _ in range(rows)],
+        subplot_titles=subplot_titles,
+        horizontal_spacing=0.08,
+        vertical_spacing=0.16,
+    )
+
+    for i, account_id in enumerate(account_order):
+        r = i // cols + 1
+        c = i % cols + 1
+        subset = active[active["Account ID"].astype(str) == account_id].copy()
+        if field == "Ticker" and "Shares" in subset.columns:
+            grouped = (
+                subset.groupby(field, as_index=False)
+                .agg({"Market Value": "sum", "Shares": "sum"})
+                .sort_values("Market Value", ascending=False)
+            )
+            customdata = np.stack([
+                pd.to_numeric(grouped["Shares"], errors="coerce").fillna(0.0),
+            ], axis=-1)
+        else:
+            grouped = subset.groupby(field, as_index=False)["Market Value"].sum().sort_values("Market Value", ascending=False)
+            customdata = None
+        fig.add_trace(
+            go.Pie(
+                labels=grouped[field],
+                values=grouped["Market Value"],
+                hole=0.48,
+                name=str(account_id),
+                textinfo="none",
+                texttemplate=_pie_texttemplate(field, show_account_count=False),
+                textposition="inside",
+                insidetextorientation="horizontal",
+                customdata=customdata,
+                hovertemplate=_pie_hovertemplate(field, account_id, include_account_count=False),
+                showlegend=False,
+            ),
+            row=r,
+            col=c,
+        )
+
+    dynamic_height = max(430, 310 * rows)
+    fig.update_layout(title=title, uniformtext_minsize=9, uniformtext_mode="show")
+    return apply_chart_theme(fig, height=dynamic_height, legend_title=chart_label(field), top=86, bottom=54, left=36, right=36)
+
+
+def make_bar_chart(df: pd.DataFrame, x: str, y: str, title: str, color: Optional[str] = None) -> go.Figure:
     if df is None or df.empty or x not in df.columns or y not in df.columns:
         return labeled_empty_figure(title, chart_label(x), chart_label(y))
     data = df.copy()
+    labels = {x: chart_label(x), y: chart_label(y)}
+    if color and color in data.columns:
+        labels[color] = chart_label(color)
     fig = px.bar(
         data,
         x=x,
         y=y,
+        color=color if color and color in data.columns else None,
         title=title,
-        labels={x: chart_label(x), y: chart_label(y)},
+        labels=labels,
         text=y,
     )
     fig.update_traces(
@@ -1365,31 +1513,54 @@ def make_bar_chart(df: pd.DataFrame, x: str, y: str, title: str) -> go.Figure:
     )
     fig.update_layout(uniformtext_minsize=10, uniformtext_mode="show")
     fig = apply_bar_label_safety(fig, data[y], orientation="v", zero_floor=True)
-    return apply_chart_theme(fig, height=430, xaxis_title=chart_label(x), yaxis_title=chart_label(y), top=84, bottom=88, left=92, right=60)
+    legend_title = chart_label(color) if color and color in data.columns else ""
+    return apply_chart_theme(fig, height=430, xaxis_title=chart_label(x), yaxis_title=chart_label(y), legend_title=legend_title, top=84, bottom=88, left=92, right=60)
 
 
 def make_top_movers_chart(holdings: pd.DataFrame) -> go.Figure:
     if holdings is None or holdings.empty:
-        return labeled_empty_figure("Top Gainers / Losers", "Return (%)", "Ticker")
+        return labeled_empty_figure("Top Gainers / Losers", "Return (%)", "Ticker / Account ID")
     active = holdings[holdings["Holding Status"] == "Active"].copy()
     if active.empty:
-        return labeled_empty_figure("Top Gainers / Losers", "Return (%)", "Ticker")
+        return labeled_empty_figure("Top Gainers / Losers", "Return (%)", "Ticker / Account ID")
     top = pd.concat([active.nlargest(5, "Return %"), active.nsmallest(5, "Return %")]).drop_duplicates()
     top = top.sort_values("Return %")
+    top["Ticker / Account ID"] = top.apply(
+        lambda r: f"{r.get('Ticker', '')} · {_short_label(r.get('Account ID', ''), 28)}",
+        axis=1,
+    )
     fig = px.bar(
         top,
         x="Return %",
-        y="Ticker",
+        y="Ticker / Account ID",
+        color="Account ID" if "Account ID" in top.columns else None,
         orientation="h",
-        hover_data={"account_name": True, "Market Value": ":$,.2f", "Unrealized P/L": ":$,.2f", "Return %": ":.2%"},
+        custom_data=["Ticker", "Account ID", "Market Value", "Unrealized P/L"],
         text="Return %",
-        title="Top Gainers / Losers",
-        labels={"Return %": "Return (%)", "Ticker": "Ticker", "account_name": "Account", "Market Value": "Market Value ($)", "Unrealized P/L": "Unrealized P/L ($)"},
+        title="Top Gainers / Losers by Account ID",
+        labels={
+            "Return %": "Return (%)",
+            "Ticker / Account ID": "Ticker / Account ID",
+            "Account ID": "Account ID",
+            "Market Value": "Market Value ($)",
+            "Unrealized P/L": "Unrealized P/L ($)",
+        },
     )
-    fig.update_traces(texttemplate="%{text:.1%}", textposition="outside", cliponaxis=False)
+    fig.update_traces(
+        texttemplate="%{text:.1%}",
+        textposition="outside",
+        cliponaxis=False,
+        hovertemplate=(
+            "Ticker: %{customdata[0]}<br>"
+            "Account ID: %{customdata[1]}<br>"
+            "Return: %{x:.2%}<br>"
+            "Market Value: $%{customdata[2]:,.2f}<br>"
+            "Unrealized P/L: $%{customdata[3]:,.2f}<extra></extra>"
+        ),
+    )
     fig = apply_bar_label_safety(fig, top["Return %"], orientation="h", zero_floor=False)
     fig.update_xaxes(tickformat=".1%", zeroline=True)
-    return apply_chart_theme(fig, height=430, xaxis_title="Return (%)", yaxis_title="Ticker", top=84, bottom=76, left=86, right=76)
+    return apply_chart_theme(fig, height=460, xaxis_title="Return (%)", yaxis_title="Ticker / Account ID", legend_title="Account ID", top=84, bottom=76, left=180, right=86)
 
 
 def make_realized_chart(realized_df: pd.DataFrame, group: str = "Ticker") -> go.Figure:
@@ -1453,7 +1624,7 @@ def build_upcoming_dividends(holdings: pd.DataFrame, dividend_analysis: Dict[str
             rows.append({
                 "Ticker": ticker,
                 "Account ID": row["Account ID"],
-                "Account": row.get("account_name", row["Account ID"]),
+                "Account": row["Account ID"],
                 "Estimated Ex-Date": ex_date,
                 "Estimated Pay Date": "Unknown",
                 "Estimated Dividend / Share": recent_div,
@@ -1719,7 +1890,7 @@ def render_semantic_table(df: pd.DataFrame, formatters: Optional[Dict[str, Any]]
         for col in columns:
             raw = row[col]
             cls = _semantic_class(raw, col)
-            if str(col).lower() in {"ticker", "account id", "account_id", "account", "account name", "account_name", "owner", "tax_bucket"}:
+            if str(col).lower() in {"ticker", "account id", "account_id", "account", "account name", "account_name", "account ids", "owner", "tax_bucket"}:
                 cls = (cls + " hwt-strong").strip()
             display = _display_value(raw, formatters.get(col), col)
             class_attr = f" class='{cls}'" if cls else ""
@@ -1914,21 +2085,21 @@ def render_overview(holdings: pd.DataFrame, realized_df: pd.DataFrame, dividends
         render_kpi_card("Current Value", fmt_currency(summary["current_value"]), "Active holdings only")
     with c3:
         tone = "positive" if summary["unrealized_pl"] >= 0 else "negative"
-        render_kpi_card("Unrealized P/L", fmt_currency(summary["unrealized_pl"]), "Open positions", tone)
+        render_kpi_card("Unrealized P/L", fmt_currency_with_pct(summary["unrealized_pl"], summary.get("unrealized_return_pct")), "Open positions", tone)
     with c4:
         tone = "positive" if summary["realized_pl"] >= 0 else "negative"
-        render_kpi_card("Realized P/L", fmt_currency(summary["realized_pl"]), "FIFO-matched sales", tone)
+        render_kpi_card("Realized P/L", fmt_currency_with_pct(summary["realized_pl"], summary.get("realized_return_pct")), "FIFO-matched sales", tone)
     st.markdown('<div class="kpi-row-gap"></div>', unsafe_allow_html=True)
     d1, d2, d3, d4 = st.columns(4)
     with d1:
-        render_kpi_card("Actual Dividends YTD", fmt_currency(summary["actual_dividends_ytd"]), "Net payments received", "blue")
+        render_kpi_card("Actual Dividends YTD", fmt_currency_with_pct(summary["actual_dividends_ytd"], summary.get("actual_dividend_ytd_yield"), signed=False), "Net payments received", "blue")
     with d2:
-        render_kpi_card("Actual Dividends All-Time", fmt_currency(summary["actual_dividends_all_time"]), "From dividends.csv", "blue")
+        render_kpi_card("Actual Dividends All-Time", fmt_currency_with_pct(summary["actual_dividends_all_time"], summary.get("actual_dividend_all_time_yield"), signed=False), "From dividends.csv", "blue")
     with d3:
         tone = "positive" if summary["dividend_inclusive_pl"] >= 0 else "negative"
-        render_kpi_card("Total Return incl. Dividends", fmt_currency(summary["dividend_inclusive_pl"]), "Realized + unrealized + dividends", tone)
+        render_kpi_card("Total Return incl. Dividends", fmt_currency_with_pct(summary["dividend_inclusive_pl"], summary.get("dividend_adjusted_return_pct")), "Realized + unrealized + dividends", tone)
     with d4:
-        render_kpi_card("Estimated Annual Dividend", fmt_currency(summary["estimated_annual_dividend"]), "Estimated, not guaranteed", "blue")
+        render_kpi_card("Estimated Annual Dividend", fmt_currency_with_pct(summary["estimated_annual_dividend"], summary.get("estimated_dividend_yield"), signed=False), "Estimated, not guaranteed", "blue")
 
     exp = exposure_by_ticker(holdings)
     if not exp.empty:
@@ -1942,6 +2113,13 @@ def render_overview(holdings: pd.DataFrame, realized_df: pd.DataFrame, dividends
         st.plotly_chart(make_allocation_chart(holdings, "Ticker", "Allocation by Ticker"), use_container_width=True, key="overview_allocation_ticker")
     with b:
         st.plotly_chart(make_allocation_chart(holdings, "tax_bucket", "Allocation by Tax Bucket"), use_container_width=True, key="overview_allocation_tax")
+
+    aa, bb = st.columns(2)
+    with aa:
+        st.plotly_chart(make_account_allocation_donut_chart(holdings, "Ticker", "Account ID-Level Allocation by Ticker"), use_container_width=True, key="overview_account_allocation_ticker")
+    with bb:
+        st.plotly_chart(make_account_allocation_donut_chart(holdings, "tax_bucket", "Account ID-Level Allocation by Tax Bucket"), use_container_width=True, key="overview_account_allocation_tax")
+
     c, d = st.columns(2)
     with c:
         st.plotly_chart(make_top_movers_chart(holdings), use_container_width=True, key="overview_top_movers")
@@ -1961,7 +2139,7 @@ def render_accounts_tab(holdings: pd.DataFrame, accounts: pd.DataFrame, dividend
     with c1:
         st.plotly_chart(make_bar_chart(group_summary(holdings, "owner"), "owner", "Market Value", "Market Value by Owner"), use_container_width=True, key="acct_owner_mv")
     with c2:
-        st.plotly_chart(make_bar_chart(group_summary(holdings, "account_name"), "account_name", "Market Value", "Market Value by Account"), use_container_width=True, key="acct_account_mv")
+        st.plotly_chart(make_bar_chart(group_summary(holdings, "Account ID"), "Account ID", "Market Value", "Market Value by Account ID", color="Account ID"), use_container_width=True, key="acct_account_mv")
     c3, c4 = st.columns(2)
     with c3:
         st.plotly_chart(make_bar_chart(group_summary(holdings, "tax_bucket"), "tax_bucket", "Market Value", "Market Value by Tax Bucket"), use_container_width=True, key="acct_tax_mv")
@@ -1976,7 +2154,7 @@ def render_holdings_tab(holdings: pd.DataFrame, show_closed: bool) -> None:
         display = display[display["Holding Status"] == "Active"].copy()
     st.caption("Closed positions are hidden by default and are excluded from future dividend projections. Enable 'Show Closed Positions' in the sidebar to inspect fully sold positions.")
     cols = [
-        "owner", "account_name", "tax_bucket", "Ticker", "Shares", "Avg Buy Price", "Current Price", "Cost Basis", "Market Value", "Unrealized P/L", "Return %", "Realized P/L", "Actual Dividends", "Total Return incl. Dividends", "Portfolio Weight %", "Estimated Annual Dividend", "Yield on Cost", "Current Yield", "Dividend Frequency", "Next Estimated Ex-Date", "Dividend Status", "Holding Status",
+        "owner", "Account ID", "account_name", "tax_bucket", "Ticker", "Shares", "Avg Buy Price", "Current Price", "Cost Basis", "Market Value", "Unrealized P/L", "Return %", "Realized P/L", "Actual Dividends", "Total Return incl. Dividends", "Portfolio Weight %", "Estimated Annual Dividend", "Yield on Cost", "Current Yield", "Dividend Frequency", "Next Estimated Ex-Date", "Dividend Status", "Holding Status",
     ]
     cols = [c for c in cols if c in display.columns]
     style_money_table(display[cols] if not display.empty else display, height=560)
@@ -1991,7 +2169,7 @@ def render_realized_tab(realized_df: pd.DataFrame, holdings: pd.DataFrame) -> No
     with c1:
         st.plotly_chart(make_realized_chart(realized_df, "Ticker"), use_container_width=True, key="realized_by_ticker")
     with c2:
-        group = "account_name" if realized_df is not None and not realized_df.empty and "account_name" in realized_df.columns else "Account ID"
+        group = "Account ID"
         st.plotly_chart(make_realized_chart(realized_df, group), use_container_width=True, key="realized_by_account")
     st.markdown("### Realized Lot Matches")
     style_money_table(realized_df, height=480)
@@ -2003,7 +2181,7 @@ def render_realized_tab(realized_df: pd.DataFrame, holdings: pd.DataFrame) -> No
         if closed.empty:
             st.info("No closed positions in the selected filters.")
         else:
-            style_money_table(closed[[c for c in ["owner", "account_name", "Ticker", "Realized P/L", "Actual Dividends", "Total Return incl. Dividends", "Holding Status"] if c in closed.columns]], height=320)
+            style_money_table(closed[[c for c in ["owner", "Account ID", "account_name", "Ticker", "Realized P/L", "Actual Dividends", "Total Return incl. Dividends", "Holding Status"] if c in closed.columns]], height=320)
 
 
 def render_dividend_tab(holdings: pd.DataFrame, dividends: pd.DataFrame, upcoming: pd.DataFrame, dividend_analysis: Dict[str, Dict[str, Any]]) -> None:
@@ -2025,11 +2203,11 @@ def render_dividend_tab(holdings: pd.DataFrame, dividends: pd.DataFrame, upcomin
     with c3:
         st.plotly_chart(make_bar_chart(by_ticker, "Ticker", "Actual Dividends", "Actual Dividends by Ticker"), use_container_width=True, key="div_by_ticker")
     with c4:
-        if not div_enriched.empty and "account_name" in div_enriched.columns:
-            by_account = div_enriched.groupby("account_name", as_index=False)["net_amount"].sum().rename(columns={"account_name": "Account", "net_amount": "Actual Dividends"})
+        if not div_enriched.empty and "account_id" in div_enriched.columns:
+            by_account = div_enriched.groupby("account_id", as_index=False)["net_amount"].sum().rename(columns={"account_id": "Account ID", "net_amount": "Actual Dividends"})
         else:
             by_account = pd.DataFrame()
-        st.plotly_chart(make_bar_chart(by_account, "Account", "Actual Dividends", "Actual Dividends by Account"), use_container_width=True, key="div_by_account")
+        st.plotly_chart(make_bar_chart(by_account, "Account ID", "Actual Dividends", "Actual Dividends by Account ID", color="Account ID"), use_container_width=True, key="div_by_account")
     st.markdown("### Actual Dividend Table")
     style_money_table(dividends, height=320)
 
