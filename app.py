@@ -24,7 +24,7 @@ from zoneinfo import ZoneInfo
 
 APP_TITLE = "Household Wealth Tracker"
 CREATOR_NAME = "Eucalyptuss"
-APP_VERSION = "1.0.18"
+APP_VERSION = "1.0.19"
 BASE_DIR = Path(__file__).resolve().parent
 ET = ZoneInfo("America/New_York")
 TODAY = datetime.now(ET).date()
@@ -1397,36 +1397,102 @@ def _short_label(value: Any, max_len: int = 24) -> str:
     return text if len(text) <= max_len else text[: max_len - 1] + "…"
 
 
-def compact_account_id(value: Any, max_len: int = 16) -> str:
-    """Return a readable short label for an account_id while preserving the full value in hover text.
+def compact_account_id(value: Any, max_len: int = 14) -> str:
+    """Return a compact, meaningful account_id label for chart axes.
+
+    The goal is not generic truncation. Account IDs often include repeated broker
+    tokens such as FID/FIDELITY plus verbose account-type tokens. The y-axis should
+    keep the owner/family prefix and the account type, while removing common
+    filler tokens.
 
     Examples:
-    - ME_FID_ROTH -> ME_FID_ROTH
-    - PERSONAL_FIDELITY_ROTH_IRA -> PERSONAL…IRA
+    - ME_FID_TRA_IRA -> ME_TIRA
+    - WIFE_FID_TRA_IRA -> WIFE_TIRA
+    - ME_FID_ROTH_IRA -> ME_RIRA
+    - ME_RH_TAXABLE -> ME_TAX
     """
     text = str(value).strip() if not _is_blank_like(value) else "Unknown"
-    if len(text) <= max_len:
-        return text
-    normalized = text.replace("-", "_").replace("/", "_").replace(" ", "_")
+    if not text:
+        return "Unknown"
+
+    normalized = text.upper().replace("-", "_").replace("/", "_").replace(" ", "_")
     parts = [p for p in normalized.split("_") if p]
+    if not parts:
+        return _short_label(text, max_len)
 
-    if len(parts) >= 3:
-        middle_initials = "".join(p[0] for p in parts[1:-1] if p)
-        candidate = f"{parts[0]}_{middle_initials}_{parts[-1]}"
-        if len(candidate) <= max_len:
-            return candidate
+    owner = parts[0]
 
-    if len(parts) >= 2:
-        first = parts[0][: max(3, min(6, max_len // 2))]
-        last_room = max_len - len(first) - 1
-        last = parts[-1][-max(4, last_room):]
-        candidate = f"{first}…{last}"
-        if len(candidate) <= max_len:
-            return candidate
+    broker_tokens = {
+        "FID", "FIDELITY", "RH", "ROBINHOOD", "SCH", "SCHWAB",
+        "VANGUARD", "VG", "IBKR", "TD", "TDA", "AMERITRADE",
+        "CHASE", "JPM", "BOFA", "MERRILL", "ETRADE", "E",
+    }
+    filler_tokens = {"ACCOUNT", "ACCT", "BROKERAGE", "BROKER", "PLAN"}
 
-    front = max(4, (max_len - 1) // 2)
-    back = max(4, max_len - front - 1)
-    return f"{text[:front]}…{text[-back:]}"
+    meaningful = [p for p in parts[1:] if p not in broker_tokens and p not in filler_tokens]
+
+    def build_suffix(tokens: List[str]) -> str:
+        token_set = set(tokens)
+        if not tokens:
+            return ""
+        if ("TRA" in token_set or "TRAD" in token_set or "TRADITIONAL" in token_set) and "IRA" in token_set:
+            return "TIRA"
+        if "ROTH" in token_set and "IRA" in token_set:
+            return "RIRA"
+        if "ROLLOVER" in token_set and "IRA" in token_set:
+            return "IRA"
+        if "SEP" in token_set and "IRA" in token_set:
+            return "SEPIRA"
+        if "SIMPLE" in token_set and "IRA" in token_set:
+            return "SIRA"
+        if "IRA" in token_set:
+            return "IRA"
+        if "ROTH" in token_set:
+            return "ROTH"
+        if "TAXABLE" in token_set or "TAX" in token_set:
+            return "TAX"
+        if "HSA" in token_set:
+            return "HSA"
+        if "401K" in token_set or "401" in token_set:
+            return "401K"
+        if "529" in token_set:
+            return "529"
+        if "CMA" in token_set:
+            return "CMA"
+
+        cleaned: List[str] = []
+        for token in tokens:
+            alias = {
+                "TRADITIONAL": "TRAD",
+                "TAXABLE": "TAX",
+                "INDIVIDUAL": "IND",
+                "JOINT": "JNT",
+            }.get(token, token)
+            cleaned.append(alias)
+        if len(cleaned) == 1:
+            return cleaned[0][:8]
+        return "".join(t[0] for t in cleaned if t)[:8]
+
+    suffix = build_suffix(meaningful)
+    candidate = f"{owner}_{suffix}" if suffix else owner
+    if len(candidate) <= max_len:
+        return candidate
+
+    # Keep the owner prefix readable and compress only the suffix when needed.
+    if suffix:
+        room = max_len - len(owner) - 1
+        if room >= 4:
+            return f"{owner}_{suffix[:room]}"
+
+    return _short_label(candidate, max_len)
+
+
+def compact_account_axis_label(ticker: Any, account_id: Any, max_len: int = 22) -> str:
+    """Build the short y-axis label used by Top Gainers / Losers."""
+    ticker_text = str(ticker).strip().upper() if not _is_blank_like(ticker) else "Unknown"
+    short_account = compact_account_id(account_id)
+    label = f"{ticker_text} · {short_account}"
+    return label if len(label) <= max_len else f"{_short_label(ticker_text, 8)} · {_short_label(short_account, max_len - min(len(ticker_text), 8) - 3)}"
 
 
 def _pie_texttemplate(field: str, show_account_count: bool = False) -> str:
@@ -1670,8 +1736,8 @@ def make_top_movers_chart(holdings: pd.DataFrame, height: Optional[int] = None) 
         fig.update_layout(height=chart_height)
         return fig
 
-    top["Short Account ID"] = top["Account ID"].map(lambda v: compact_account_id(v, 16)) if "Account ID" in top.columns else "Unknown"
-    base_labels = top.apply(lambda r: f"{r.get('Ticker', '')} · {r.get('Short Account ID', '')}", axis=1).tolist()
+    top["Short Account ID"] = top["Account ID"].map(compact_account_id) if "Account ID" in top.columns else "Unknown"
+    base_labels = top.apply(lambda r: compact_account_axis_label(r.get("Ticker", ""), r.get("Account ID", "")), axis=1).tolist()
     top["Ticker / Short Account ID"] = _make_unique_display_labels(base_labels)
 
     fig = px.bar(
@@ -1709,7 +1775,7 @@ def make_top_movers_chart(holdings: pd.DataFrame, height: Optional[int] = None) 
     fig = apply_bar_label_safety(fig, top["Return %"], orientation="h", zero_floor=False)
     fig.update_xaxes(tickformat=".1%", zeroline=True)
     fig.update_yaxes(categoryorder="array", categoryarray=top["Ticker / Short Account ID"].tolist())
-    return apply_chart_theme(fig, height=chart_height, xaxis_title="Return (%)", yaxis_title=axis_title, legend_title="Account ID", top=72, bottom=60, left=150, right=92)
+    return apply_chart_theme(fig, height=chart_height, xaxis_title="Return (%)", yaxis_title=axis_title, legend_title="Account ID", top=72, bottom=60, left=116, right=92)
 
 
 def make_realized_chart(realized_df: pd.DataFrame, group: str = "Ticker") -> go.Figure:
