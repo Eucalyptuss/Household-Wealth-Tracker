@@ -24,7 +24,7 @@ from zoneinfo import ZoneInfo
 
 APP_TITLE = "Household Wealth Tracker"
 CREATOR_NAME = "Eucalyptuss"
-APP_VERSION = "1.0.15"
+APP_VERSION = "1.0.18"
 BASE_DIR = Path(__file__).resolve().parent
 ET = ZoneInfo("America/New_York")
 TODAY = datetime.now(ET).date()
@@ -205,6 +205,14 @@ def inject_css() -> None:
         .kpi-value.positive { color: #16A34A !important; }
         .kpi-value.negative { color: #DC2626 !important; }
         .kpi-value.blue { color: #2563EB !important; }
+        /* Donut chart labels: shrink with the chart container but keep a readable floor. */
+        div[data-testid="stPlotlyChart"] { container-type: inline-size; }
+        div[data-testid="stPlotlyChart"] .pielayer text {
+            font-size: clamp(8px, 0.95vw, 12px) !important;
+            font-size: clamp(8px, 2.2cqw, 12px) !important;
+            font-weight: 750 !important;
+            text-anchor: middle !important;
+        }
         </style>
         """,
         unsafe_allow_html=True,
@@ -1110,17 +1118,66 @@ def group_summary(holdings: pd.DataFrame, group_col: str) -> pd.DataFrame:
 
 
 def exposure_by_ticker(holdings: pd.DataFrame) -> pd.DataFrame:
+    """Aggregate active household exposure by ticker.
+
+    The exposure table now includes profit amount and profit ratio so the user can
+    review not only concentration but also current performance by ticker.
+    Profit amount is based on active open holdings only:
+        Unrealized P/L = Market Value - Cost Basis
+        Return % = Unrealized P/L / Cost Basis
+    """
     if holdings is None or holdings.empty:
         return pd.DataFrame()
     active = holdings[holdings["Holding Status"] == "Active"].copy()
     if active.empty:
         return pd.DataFrame()
-    exp = active.groupby("Ticker", as_index=False).agg({"Shares": "sum", "Market Value": "sum", "Estimated Annual Dividend": "sum"})
-    account_ids = active.groupby("Ticker")["Account ID"].apply(lambda x: ", ".join(sorted(set(map(str, x))))).reset_index(name="Account IDs")
+
+    numeric_cols = [
+        "Shares",
+        "Cost Basis",
+        "Market Value",
+        "Unrealized P/L",
+        "Estimated Annual Dividend",
+    ]
+    for col in numeric_cols:
+        if col not in active.columns:
+            active[col] = 0.0
+        active[col] = pd.to_numeric(active[col], errors="coerce").fillna(0.0)
+
+    exp = (
+        active.groupby("Ticker", as_index=False)
+        .agg({
+            "Shares": "sum",
+            "Cost Basis": "sum",
+            "Market Value": "sum",
+            "Unrealized P/L": "sum",
+            "Estimated Annual Dividend": "sum",
+        })
+        .sort_values("Market Value", ascending=False)
+    )
+    exp["Return %"] = np.where(exp["Cost Basis"] > 0, exp["Unrealized P/L"] / exp["Cost Basis"], np.nan)
+
+    account_ids = (
+        active.groupby("Ticker")["Account ID"]
+        .apply(lambda x: ", ".join(sorted(set(map(str, x)))))
+        .reset_index(name="Account IDs")
+    )
     exp = exp.merge(account_ids, on="Ticker", how="left")
     total_mv = exp["Market Value"].sum()
     exp["Household Weight %"] = np.where(total_mv > 0, exp["Market Value"] / total_mv, 0.0)
-    return exp.sort_values("Market Value", ascending=False)
+
+    preferred_cols = [
+        "Ticker",
+        "Shares",
+        "Cost Basis",
+        "Market Value",
+        "Unrealized P/L",
+        "Return %",
+        "Household Weight %",
+        "Estimated Annual Dividend",
+        "Account IDs",
+    ]
+    return exp[[c for c in preferred_cols if c in exp.columns]].sort_values("Market Value", ascending=False)
 
 # ============================================================
 # Charts
@@ -1437,7 +1494,7 @@ def make_allocation_chart(holdings: pd.DataFrame, field: str = "Ticker", title: 
         customdata=customdata,
         hovertemplate=_pie_hovertemplate(field, include_account_count=(field == "Ticker")),
     )
-    fig.update_layout(uniformtext_minsize=10, uniformtext_mode="show")
+    fig.update_layout(uniformtext_minsize=8, uniformtext_mode="show")
     return apply_chart_theme(fig, height=420, legend_title=chart_label(field), top=76, bottom=54, left=42, right=78)
 
 
@@ -1518,7 +1575,7 @@ def make_account_allocation_donut_chart(
         )
 
     dynamic_height = max(430, 310 * rows)
-    fig.update_layout(title=title, uniformtext_minsize=9, uniformtext_mode="show")
+    fig.update_layout(title=title, uniformtext_minsize=8, uniformtext_mode="show")
     return apply_chart_theme(fig, height=dynamic_height, legend_title=chart_label(field), top=86, bottom=54, left=36, right=36)
 
 
@@ -1574,12 +1631,18 @@ def top_movers_data(holdings: pd.DataFrame) -> pd.DataFrame:
     return active.sort_values(sort_cols, ascending=[True] + [True] * (len(sort_cols) - 1)).reset_index(drop=True)
 
 
-def top_movers_chart_height(holdings: pd.DataFrame, *, min_height: int = 500, row_height: int = 42, max_height: int = 1600) -> int:
-    """Calculate a shared lower-row chart height from all displayed gain/loss rows."""
+def top_movers_chart_height(holdings: pd.DataFrame, *, min_height: int = 360, row_height: int = 24, max_height: int = 1000) -> int:
+    """Calculate compact shared height for the gain/loss and upcoming dividend charts.
+
+    The Top Gainers / Losers bars are intentionally thin, so the category-row
+    height must be reduced as well. Earlier versions reduced only the bar width,
+    leaving the chart canvas too tall. This keeps the paired Upcoming Dividend
+    chart synchronized while making the entire lower overview row more compact.
+    """
     rows = len(top_movers_data(holdings))
     if rows <= 0:
         return min_height
-    return int(min(max_height, max(min_height, 190 + rows * row_height)))
+    return int(min(max_height, max(min_height, 150 + rows * row_height)))
 
 
 def _make_unique_display_labels(labels: Iterable[str]) -> List[str]:
@@ -1630,6 +1693,7 @@ def make_top_movers_chart(holdings: pd.DataFrame, height: Optional[int] = None) 
         },
     )
     fig.update_traces(
+        width=0.38,
         texttemplate="%{text:.1%}",
         textposition="outside",
         cliponaxis=False,
@@ -1645,7 +1709,7 @@ def make_top_movers_chart(holdings: pd.DataFrame, height: Optional[int] = None) 
     fig = apply_bar_label_safety(fig, top["Return %"], orientation="h", zero_floor=False)
     fig.update_xaxes(tickformat=".1%", zeroline=True)
     fig.update_yaxes(categoryorder="array", categoryarray=top["Ticker / Short Account ID"].tolist())
-    return apply_chart_theme(fig, height=chart_height, xaxis_title="Return (%)", yaxis_title=axis_title, legend_title="Account ID", top=84, bottom=76, left=150, right=92)
+    return apply_chart_theme(fig, height=chart_height, xaxis_title="Return (%)", yaxis_title=axis_title, legend_title="Account ID", top=72, bottom=60, left=150, right=92)
 
 
 def make_realized_chart(realized_df: pd.DataFrame, group: str = "Ticker") -> go.Figure:
