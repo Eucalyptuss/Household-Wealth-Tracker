@@ -22,3 +22,5 @@ payment_date,ticker,net_amount,account_id,note
 2025-08-27,QYLD,7.32,ME_FID_TRA_IRA,monthly dividend
 2025-09-02,QQQT,18.91,ME_FID_TRA_IRA,monthly dividend
 2025-09-03,JEPI,6.69,ME_FID_TRA_IRA,monthly dividend
+2025-09-08,GPIQ,8.94,ME_FID_TRA_IRA,monthly dividend
+2025-09-08,IQQQ,4.13,ME_FID_TRA_IRA,monthly dividend
