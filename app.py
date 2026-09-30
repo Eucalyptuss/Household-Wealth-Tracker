@@ -16,6 +16,10 @@ import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 import streamlit as st
 import yfinance as yf
+try:
+    from streamlit_autorefresh import st_autorefresh
+except Exception:
+    st_autorefresh = None
 from zoneinfo import ZoneInfo
 
 # ============================================================
@@ -24,7 +28,7 @@ from zoneinfo import ZoneInfo
 
 APP_TITLE = "Household Wealth Tracker"
 CREATOR_NAME = "Eucalyptuss"
-APP_VERSION = "1.0.19"
+APP_VERSION = "1.0.20"
 BASE_DIR = Path(__file__).resolve().parent
 ET = ZoneInfo("America/New_York")
 TODAY = datetime.now(ET).date()
@@ -1120,9 +1124,10 @@ def group_summary(holdings: pd.DataFrame, group_col: str) -> pd.DataFrame:
 def exposure_by_ticker(holdings: pd.DataFrame) -> pd.DataFrame:
     """Aggregate active household exposure by ticker.
 
-    The exposure table now includes profit amount and profit ratio so the user can
-    review not only concentration but also current performance by ticker.
-    Profit amount is based on active open holdings only:
+    The exposure table includes concentration, average open cost per share,
+    current profit amount, and current profit ratio by ticker.
+    Calculations are based on active open holdings only:
+        Avg Buy Price = Cost Basis / Shares
         Unrealized P/L = Market Value - Cost Basis
         Return % = Unrealized P/L / Cost Basis
     """
@@ -1155,20 +1160,20 @@ def exposure_by_ticker(holdings: pd.DataFrame) -> pd.DataFrame:
         })
         .sort_values("Market Value", ascending=False)
     )
-    exp["Return %"] = np.where(exp["Cost Basis"] > 0, exp["Unrealized P/L"] / exp["Cost Basis"], np.nan)
-
     account_ids = (
         active.groupby("Ticker")["Account ID"]
         .apply(lambda x: ", ".join(sorted(set(map(str, x)))))
         .reset_index(name="Account IDs")
     )
     exp = exp.merge(account_ids, on="Ticker", how="left")
+    exp["Avg Buy Price"] = np.where(exp["Shares"] > 0, exp["Cost Basis"] / exp["Shares"], np.nan)
+    exp["Return %"] = np.where(exp["Cost Basis"] > 0, exp["Unrealized P/L"] / exp["Cost Basis"], np.nan)
     total_mv = exp["Market Value"].sum()
     exp["Household Weight %"] = np.where(total_mv > 0, exp["Market Value"] / total_mv, 0.0)
-
-    preferred_cols = [
+    ordered_cols = [
         "Ticker",
         "Shares",
+        "Avg Buy Price",
         "Cost Basis",
         "Market Value",
         "Unrealized P/L",
@@ -1177,7 +1182,7 @@ def exposure_by_ticker(holdings: pd.DataFrame) -> pd.DataFrame:
         "Estimated Annual Dividend",
         "Account IDs",
     ]
-    return exp[[c for c in preferred_cols if c in exp.columns]].sort_values("Market Value", ascending=False)
+    return exp[[c for c in ordered_cols if c in exp.columns]].sort_values("Market Value", ascending=False)
 
 # ============================================================
 # Charts
@@ -2175,6 +2180,37 @@ def render_sidebar(accounts_clean: pd.DataFrame, tx_clean: pd.DataFrame) -> Dict
         st.cache_data.clear()
         st.session_state.last_online_refresh = now_et_str()
         st.rerun()
+
+    auto_refresh_enabled = st.sidebar.checkbox(
+        "Auto Refresh Online Data",
+        value=False,
+        help="Automatically clear cached online market data and rerun the dashboard at the selected interval.",
+    )
+    auto_refresh_seconds = st.sidebar.number_input(
+        "Auto refresh interval (seconds)",
+        min_value=5,
+        max_value=3600,
+        value=10,
+        step=5,
+        disabled=not auto_refresh_enabled,
+        help="Default is 10 seconds. Auto refresh is disabled on first load.",
+    )
+    if auto_refresh_enabled:
+        if st_autorefresh is None:
+            st.sidebar.warning("Install streamlit-autorefresh to enable automatic refresh.")
+        else:
+            refresh_count = st_autorefresh(
+                interval=int(auto_refresh_seconds) * 1000,
+                limit=None,
+                key="online_data_autorefresh",
+            )
+            last_count = st.session_state.get("_last_online_autorefresh_count", -1)
+            if refresh_count != last_count:
+                st.session_state["_last_online_autorefresh_count"] = refresh_count
+                if refresh_count > 0:
+                    st.cache_data.clear()
+                    st.session_state.last_online_refresh = now_et_str()
+
     st.sidebar.caption(f"{CREATOR_NAME} · {APP_VERSION}")
     theme_options = ["Auto", "Light", "Dark"]
     current_theme_mode = st.session_state.get("display_theme_mode", "Auto")
@@ -2187,7 +2223,7 @@ def render_sidebar(accounts_clean: pd.DataFrame, tx_clean: pd.DataFrame) -> Dict
         help="Auto follows Streamlit theme when exposed. Choose Light or Dark if chart/table text contrast does not match the browser mode.",
     )
 
-    with st.sidebar.expander("CSV Sources", expanded=True):
+    with st.sidebar.expander("CSV Sources", expanded=False):
         uploaded_accounts = st.file_uploader("Upload accounts.csv", type=["csv"], key="accounts_uploader")
         if uploaded_accounts is not None:
             try:
@@ -2334,11 +2370,11 @@ def render_overview(holdings: pd.DataFrame, realized_df: pd.DataFrame, dividends
     with b:
         st.plotly_chart(make_allocation_chart(holdings, "tax_bucket", "Allocation by Tax Bucket"), use_container_width=True, key="overview_allocation_tax")
 
-    aa, bb = st.columns(2)
-    with aa:
-        st.plotly_chart(make_account_allocation_donut_chart(holdings, "Ticker", "Account ID-Level Allocation by Ticker"), use_container_width=True, key="overview_account_allocation_ticker")
-    with bb:
-        st.plotly_chart(make_account_allocation_donut_chart(holdings, "tax_bucket", "Account ID-Level Allocation by Tax Bucket"), use_container_width=True, key="overview_account_allocation_tax")
+    st.plotly_chart(
+        make_account_allocation_donut_chart(holdings, "Ticker", "Account ID-Level Allocation by Ticker"),
+        use_container_width=True,
+        key="overview_account_allocation_ticker",
+    )
 
     lower_row_height = top_movers_chart_height(holdings)
     c, d = st.columns(2)
