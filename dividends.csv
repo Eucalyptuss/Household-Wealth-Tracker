@@ -26,8 +26,8 @@ payment_date,ticker,net_amount,account_id,note
 2025-09-08,GPIQ,8.94,ME_FID_TRA_IRA,monthly dividend
 2025-09-08,IQQQ,4.13,ME_FID_TRA_IRA,monthly dividend
 2025-09-18,QQQI,15.21,ME_FID_TRA_IRA,monthly dividend
-2025-09-18,QQQI,17.75,WIFE_FID_TRA_IRA,monthly dividend
+2025-09-18,QQQI,17.75,SP_FID_TRA_IRA,monthly dividend
 2025-09-24,QYLD,10.6,ME_FID_TRA_IRA,monthly dividend
-2025-09-24,QYLD,10.6,WIFE_FID_TRA_IRA,monthly dividend
+2025-09-24,QYLD,10.6,SP_FID_TRA_IRA,monthly dividend
 2025-09-25,SPHD,3.83,ME_FID_TRA_IRA,monthly dividend
-2025-09-25,SPHD,3.63,WIFE_FID_TRA_IRA,monthly dividend
+2025-09-25,SPHD,3.63,SP_FID_TRA_IRA,monthly dividend
