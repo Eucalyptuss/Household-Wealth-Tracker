@@ -28,7 +28,7 @@ from zoneinfo import ZoneInfo
 
 APP_TITLE = "Household Wealth Tracker"
 CREATOR_NAME = "Eucalyptuss"
-APP_VERSION = "1.0.20"
+APP_VERSION = "1.0.21"
 BASE_DIR = Path(__file__).resolve().parent
 ET = ZoneInfo("America/New_York")
 TODAY = datetime.now(ET).date()
@@ -1599,16 +1599,22 @@ def make_account_allocation_donut_chart(
     if not account_order:
         return labeled_empty_figure(title, chart_label(field), "Market Value ($)")
 
-    cols = 2 if len(account_order) > 1 else 1
-    rows = int(math.ceil(len(account_order) / cols))
+    # Layout rule for Account ID-level donuts:
+    # - 1 to 4 accounts: show all donuts in a single row.
+    # - 5 or more accounts: use two rows and distribute accounts across columns.
+    # This avoids the previous fixed 2-column layout and makes better use of the
+    # full-width Overview area.
+    account_count = len(account_order)
+    rows = 1 if account_count <= 4 else 2
+    cols = account_count if rows == 1 else int(math.ceil(account_count / rows))
     subplot_titles = [_short_label(account_id, 32) for account_id in account_order]
     fig = make_subplots(
         rows=rows,
         cols=cols,
         specs=[[{"type": "domain"} for _ in range(cols)] for _ in range(rows)],
         subplot_titles=subplot_titles,
-        horizontal_spacing=0.08,
-        vertical_spacing=0.16,
+        horizontal_spacing=0.035 if cols >= 4 else 0.055,
+        vertical_spacing=0.18 if rows > 1 else 0.10,
     )
 
     for i, account_id in enumerate(account_order):
@@ -1645,9 +1651,10 @@ def make_account_allocation_donut_chart(
             col=c,
         )
 
-    dynamic_height = max(430, 310 * rows)
+    dynamic_height = 470 if rows == 1 else 760
     fig.update_layout(title=title, uniformtext_minsize=8, uniformtext_mode="show")
-    return apply_chart_theme(fig, height=dynamic_height, legend_title=chart_label(field), top=86, bottom=54, left=36, right=36)
+    fig.update_annotations(font_size=11 if cols >= 4 else 12)
+    return apply_chart_theme(fig, height=dynamic_height, legend_title=chart_label(field), top=86, bottom=54, left=30, right=30)
 
 
 def make_bar_chart(df: pd.DataFrame, x: str, y: str, title: str, color: Optional[str] = None) -> go.Figure:
@@ -2190,7 +2197,7 @@ def render_sidebar(accounts_clean: pd.DataFrame, tx_clean: pd.DataFrame) -> Dict
         "Auto refresh interval (seconds)",
         min_value=5,
         max_value=3600,
-        value=10,
+        value=30,
         step=5,
         disabled=not auto_refresh_enabled,
         help="Default is 10 seconds. Auto refresh is disabled on first load.",
