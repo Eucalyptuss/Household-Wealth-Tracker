@@ -1,3 +1,4 @@
 account_id,owner,account_name,broker,account_type,tax_bucket,currency,is_active,note
 ME_FID_TRA_IRA,Me,Fidelity Traditional IRA,Fidelity,Traditional IRA,Retirement,USD,TRUE,my retirement account
-WIFE_FID_TRA_IRA,WR,Fidelity Traditional IRA,Fidelity,Traditional IRA,Retirement,USD,TRUE,my retirement account
+SP_FID_TRA_IRA,WR,Fidelity Traditional IRA,Fidelity,Traditional IRA,Retirement,USD,TRUE,sp retirement account
+ME_FID_TAXABLE,Me,Fidelity Individual,Fidelity,Individual,Taxable,USD,TRUE,my individual account
