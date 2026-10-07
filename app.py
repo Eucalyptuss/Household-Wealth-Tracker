@@ -28,7 +28,7 @@ from zoneinfo import ZoneInfo
 
 APP_TITLE = "Household Wealth Tracker"
 CREATOR_NAME = "Eucalyptuss"
-APP_VERSION = "1.0.22"
+APP_VERSION = "1.0.24"
 BASE_DIR = Path(__file__).resolve().parent
 ET = ZoneInfo("America/New_York")
 TODAY = datetime.now(ET).date()
@@ -2498,10 +2498,21 @@ def style_money_table(df: pd.DataFrame, height: int = 430) -> None:
         return
     formatters = {}
     for c in df.columns:
-        low = c.lower()
+        low = str(c).lower()
+
+        # Date/text columns must be handled before the broad money-keyword rules.
+        # For example, "Initial Balance Date" contains the word "balance" and
+        # "Cash Label" contains the word "cash". Earlier versions formatted
+        # those as currency, which made them display as N/A in HTML tables.
+        if "date" in low:
+            formatters[c] = fmt_date
+            continue
+        if any(k in low for k in ["label", "name", "id", "type", "status", "note", "owner", "bucket"]):
+            continue
+
         if any(k in low for k in ["value", "cost", "price", "p/l", "dividend", "proceeds", "amount", "basis", "cash", "interest", "balance", "impact"]):
             formatters[c] = fmt_currency
-        if "%" in c or "yield" in low or ("return" in low and c.endswith("%")) or "weight" in low:
+        if "%" in str(c) or "yield" in low or ("return" in low and str(c).endswith("%")) or "weight" in low:
             formatters[c] = fmt_pct
         if "shares" in low:
             formatters[c] = lambda v: fmt_number(v, 4)
@@ -2535,10 +2546,10 @@ def render_sidebar(accounts_clean: pd.DataFrame, tx_clean: pd.DataFrame) -> Dict
         "Auto refresh interval (seconds)",
         min_value=5,
         max_value=3600,
-        value=10,
+        value=60,
         step=5,
         disabled=not auto_refresh_enabled,
-        help="Default is 10 seconds. Auto refresh is disabled on first load.",
+        help="Default is 60 seconds. Auto refresh is disabled on first load.",
     )
     if auto_refresh_enabled:
         if st_autorefresh is None:
