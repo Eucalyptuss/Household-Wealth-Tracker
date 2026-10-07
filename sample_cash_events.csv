@@ -1,0 +1,5 @@
+date,account_id,event_type,amount,cash_label,annual_yield,note
+2026-10-07,ME_FID_ROTH,INITIAL_BALANCE,1000.00,SPAXX,0.0349,Starting SPAXX cash balance
+2026-10-07,ME_RH_TAXABLE,INITIAL_BALANCE,500.00,Cash,0.0000,Starting brokerage cash balance
+2026-10-07,SP_FID_IRA,INITIAL_BALANCE,750.00,SPAXX,0.0349,Starting SPAXX cash balance
+2026-10-07,SP_FID_TAXABLE,INITIAL_BALANCE,250.00,Cash,0.0000,Starting brokerage cash balance

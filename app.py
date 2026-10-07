@@ -28,7 +28,7 @@ from zoneinfo import ZoneInfo
 
 APP_TITLE = "Household Wealth Tracker"
 CREATOR_NAME = "Eucalyptuss"
-APP_VERSION = "1.0.21"
+APP_VERSION = "1.0.22"
 BASE_DIR = Path(__file__).resolve().parent
 ET = ZoneInfo("America/New_York")
 TODAY = datetime.now(ET).date()
@@ -60,6 +60,13 @@ LEGACY_TX_REQUIRED_COLUMNS = ["ticker", "purchase_date", "shares", "buy_price"]
 DIV_REQUIRED_COLUMNS = ["payment_date", "ticker", "net_amount", "account_id"]
 DIV_OPTIONAL_DEFAULTS = {"note": ""}
 DIV_COLUMNS = DIV_REQUIRED_COLUMNS + ["note"]
+
+CASH_EVENTS_CSV_NAME = "cash_events.csv"
+SAMPLE_CASH_EVENTS_CSV_NAME = "sample_cash_events.csv"
+CASH_EVENT_TYPES = ["INITIAL_BALANCE", "CONTRIBUTION", "WITHDRAWAL", "INTEREST", "ADJUSTMENT"]
+CASH_REQUIRED_COLUMNS = ["date", "account_id", "event_type", "amount"]
+CASH_OPTIONAL_DEFAULTS = {"cash_label": "Cash", "annual_yield": 0.0, "note": ""}
+CASH_COLUMNS = CASH_REQUIRED_COLUMNS + list(CASH_OPTIONAL_DEFAULTS.keys())
 
 PERIOD_MAP = {
     "1M": "1mo",
@@ -96,6 +103,13 @@ SAMPLE_DIVIDENDS_CSV = """payment_date,ticker,net_amount,account_id,note
 2025-12-31,SCHD,13.10,ME_FID_ROTH,actual dividend example
 2026-01-08,JEPI,7.05,SP_FID_IRA,monthly dividend example
 2026-02-20,QQQ,1.92,SP_FID_TAXABLE,received before full sell
+"""
+
+SAMPLE_CASH_EVENTS_CSV = """date,account_id,event_type,amount,cash_label,annual_yield,note
+2026-10-07,ME_FID_ROTH,INITIAL_BALANCE,1000.00,SPAXX,0.0349,Starting SPAXX cash balance
+2026-10-07,ME_RH_TAXABLE,INITIAL_BALANCE,500.00,Cash,0.0000,Starting brokerage cash balance
+2026-10-07,SP_FID_IRA,INITIAL_BALANCE,750.00,SPAXX,0.0349,Starting SPAXX cash balance
+2026-10-07,SP_FID_TAXABLE,INITIAL_BALANCE,250.00,Cash,0.0000,Starting brokerage cash balance
 """
 
 st.set_page_config(
@@ -363,6 +377,8 @@ def embedded_sample_df(kind: str) -> pd.DataFrame:
         return drop_fully_empty_rows(pd.read_csv(io.StringIO(SAMPLE_PORTFOLIO_CSV)))
     if kind == "dividends":
         return drop_fully_empty_rows(pd.read_csv(io.StringIO(SAMPLE_DIVIDENDS_CSV)))
+    if kind == "cash_events":
+        return drop_fully_empty_rows(pd.read_csv(io.StringIO(SAMPLE_CASH_EVENTS_CSV)))
     raise ValueError(kind)
 
 
@@ -401,11 +417,22 @@ def load_file_into_session(kind: str) -> None:
         st.session_state.dividends_source = source
         st.session_state.dividends_source_type = source_type
         st.session_state.dividends_signature = sig
+    elif kind == "cash_events":
+        df, source, source_type, sig = load_default_csv(CASH_EVENTS_CSV_NAME, SAMPLE_CASH_EVENTS_CSV_NAME, "cash_events")
+        st.session_state.cash_events_df = df
+        st.session_state.cash_events_source = source
+        st.session_state.cash_events_source_type = source_type
+        st.session_state.cash_events_signature = sig
 
 
 def initialize_session_state() -> None:
-    for kind in ["accounts", "portfolio", "dividends"]:
-        key = f"{kind}_df" if kind != "dividends" else "dividends_df"
+    for kind in ["accounts", "portfolio", "dividends", "cash_events"]:
+        key = {
+            "accounts": "accounts_df",
+            "portfolio": "portfolio_df",
+            "dividends": "dividends_df",
+            "cash_events": "cash_events_df",
+        }[kind]
         if key not in st.session_state:
             load_file_into_session(kind)
 
@@ -673,6 +700,91 @@ def clean_and_validate_dividends(df: pd.DataFrame, known_account_ids: Iterable[s
     duplicated = clean.duplicated(subset=duplicate_cols, keep=False)
     for _, row in clean.loc[duplicated].iterrows():
         add_quality_issue(issues, "Warning", row["row_id"], "dividend.duplicate row", row["ticker"], "Potential duplicate dividend payment row.")
+    return clean, pd.DataFrame(issues), valid_mask, migrated
+
+
+def migrate_cash_event_schema(df: pd.DataFrame) -> Tuple[pd.DataFrame, bool]:
+    out = standardize_columns(df)
+    migrated = False
+    if "as_of" in out.columns and "date" not in out.columns:
+        out = out.rename(columns={"as_of": "date"})
+        migrated = True
+    if "account" in out.columns and "account_id" not in out.columns:
+        out["account_id"] = out["account"].map(clean_id)
+        migrated = True
+    if "type" in out.columns and "event_type" not in out.columns:
+        out = out.rename(columns={"type": "event_type"})
+        migrated = True
+    if "yield" in out.columns and "annual_yield" not in out.columns:
+        out = out.rename(columns={"yield": "annual_yield"})
+        migrated = True
+    for col, default in CASH_OPTIONAL_DEFAULTS.items():
+        if col not in out.columns:
+            out[col] = default
+    for col in CASH_REQUIRED_COLUMNS:
+        if col not in out.columns:
+            out[col] = np.nan
+    return out[CASH_COLUMNS].copy(), migrated
+
+
+def normalize_annual_yield(value: Any) -> float:
+    val = safe_float(value, 0.0)
+    # Accept either 0.0349 or 3.49 for 3.49%.
+    if val > 1.0:
+        val = val / 100.0
+    return val
+
+
+def clean_and_validate_cash_events(df: pd.DataFrame, known_account_ids: Iterable[str]) -> Tuple[pd.DataFrame, pd.DataFrame, pd.Series, bool]:
+    issues: List[Dict[str, Any]] = []
+    df = drop_fully_empty_rows(df)
+    known_accounts = {clean_id(a) for a in known_account_ids if not _is_blank_like(a)}
+    if df is None or df.empty:
+        empty = pd.DataFrame(columns=["row_id"] + CASH_COLUMNS)
+        return empty, pd.DataFrame(issues), pd.Series(dtype=bool), False
+    original_cols = [str(c).strip().lower() for c in df.columns]
+    for col in CASH_REQUIRED_COLUMNS:
+        if col not in original_cols and not (col == "account_id" and "account" in original_cols):
+            add_quality_issue(issues, "Error", "CASH_EVENTS_ALL", col, "Missing", f"cash_events.csv: required column '{col}' is missing.")
+    clean, migrated = migrate_cash_event_schema(df)
+    clean.insert(0, "row_id", range(1, len(clean) + 1))
+    if migrated:
+        add_quality_issue(issues, "Info", "CASH_EVENTS_ALL", "schema", "legacy", "cash_events.csv was migrated to the current cash event schema in session.")
+    clean["account_id"] = clean["account_id"].map(clean_id)
+    clean["event_type"] = clean["event_type"].astype("string").fillna("").str.strip().str.upper()
+    clean["cash_label"] = clean["cash_label"].astype("string").fillna("Cash").str.strip().replace("", "Cash")
+    clean["note"] = clean["note"].astype("string").fillna("")
+    raw_dates = clean["date"].copy()
+    clean["date"] = pd.to_datetime(clean["date"], errors="coerce").dt.date
+    clean["amount"] = pd.to_numeric(clean["amount"], errors="coerce")
+    clean["annual_yield"] = clean["annual_yield"].map(normalize_annual_yield)
+    valid_mask = pd.Series(True, index=clean.index)
+    for idx, row in clean.iterrows():
+        row_no = row["row_id"]
+        if _is_blank_like(row["account_id"]):
+            add_quality_issue(issues, "Error", row_no, "cash.account_id", row["account_id"], "cash_events.csv: account_id is missing.")
+            valid_mask.loc[idx] = False
+        elif known_accounts and row["account_id"] not in known_accounts:
+            add_quality_issue(issues, "Error", row_no, "cash.account_id", row["account_id"], "cash_events.csv: account_id is not registered in accounts.csv.")
+        if row["event_type"] not in CASH_EVENT_TYPES:
+            add_quality_issue(issues, "Error", row_no, "cash.event_type", row["event_type"], f"event_type must be one of {', '.join(CASH_EVENT_TYPES)}.")
+            valid_mask.loc[idx] = False
+        if pd.isna(row["date"]):
+            add_quality_issue(issues, "Error", row_no, "cash.date", raw_dates.loc[idx], "date format is invalid. Expected YYYY-MM-DD.")
+            valid_mask.loc[idx] = False
+        elif row["date"] > TODAY:
+            add_quality_issue(issues, "Warning", row_no, "cash.date", row["date"], "Cash event date is in the future.")
+        if pd.isna(row["amount"]):
+            add_quality_issue(issues, "Error", row_no, "cash.amount", row["amount"], "amount must be numeric.")
+            valid_mask.loc[idx] = False
+        elif row["event_type"] in {"INITIAL_BALANCE", "CONTRIBUTION", "WITHDRAWAL", "INTEREST"} and row["amount"] < 0:
+            add_quality_issue(issues, "Warning", row_no, "cash.amount", row["amount"], "Use positive amount for INITIAL_BALANCE, CONTRIBUTION, WITHDRAWAL, and INTEREST. WITHDRAWAL is subtracted automatically.")
+        if safe_float(row["annual_yield"], 0.0) < 0:
+            add_quality_issue(issues, "Warning", row_no, "cash.annual_yield", row["annual_yield"], "annual_yield is negative. Verify intentional.")
+    duplicate_cols = ["date", "account_id", "event_type", "amount", "cash_label", "note"]
+    duplicated = clean.duplicated(subset=duplicate_cols, keep=False)
+    for _, row in clean.loc[duplicated].iterrows():
+        add_quality_issue(issues, "Warning", row["row_id"], "cash.duplicate row", row["account_id"], "Potential duplicate cash event row.")
     return clean, pd.DataFrame(issues), valid_mask, migrated
 
 # ============================================================
@@ -1183,6 +1295,231 @@ def exposure_by_ticker(holdings: pd.DataFrame) -> pd.DataFrame:
         "Account IDs",
     ]
     return exp[[c for c in ordered_cols if c in exp.columns]].sort_values("Market Value", ascending=False)
+
+
+def filtered_cash_events(cash_events: pd.DataFrame, controls: Dict[str, Any]) -> pd.DataFrame:
+    if cash_events is None or cash_events.empty:
+        return pd.DataFrame(columns=CASH_COLUMNS)
+    # Cash is account-level. Apply owner/tax/account filters but intentionally ignore ticker filters.
+    cash_controls = dict(controls)
+    cash_controls["tickers"] = []
+    return filter_frame_by_controls(cash_events, cash_controls)
+
+
+def _latest_initial_balance(events: pd.DataFrame) -> pd.DataFrame:
+    if events is None or events.empty:
+        return pd.DataFrame(columns=["account_id", "date", "amount", "cash_label", "annual_yield"])
+    initial = events[events["event_type"].astype(str).str.upper() == "INITIAL_BALANCE"].copy()
+    if initial.empty:
+        return pd.DataFrame(columns=["account_id", "date", "amount", "cash_label", "annual_yield"])
+    initial = initial.sort_values(["account_id", "date", "row_id" if "row_id" in initial.columns else "date"])
+    return initial.groupby("account_id", as_index=False).tail(1)[["account_id", "date", "amount", "cash_label", "annual_yield"]]
+
+
+def _cash_event_impact(event_type: str, amount: Any) -> float:
+    amt = safe_float(amount, 0.0)
+    event = str(event_type).upper().strip()
+    if event == "CONTRIBUTION":
+        return abs(amt)
+    if event == "WITHDRAWAL":
+        return -abs(amt)
+    if event in {"INTEREST", "ADJUSTMENT"}:
+        return amt
+    return 0.0
+
+
+def build_cash_table(cash_events: pd.DataFrame, transactions: pd.DataFrame, dividends: pd.DataFrame, accounts: pd.DataFrame, holdings: pd.DataFrame) -> pd.DataFrame:
+    account_ids = set()
+    for df, col in [(accounts, "account_id"), (cash_events, "account_id"), (transactions, "account_id"), (dividends, "account_id")]:
+        if df is not None and not df.empty and col in df.columns:
+            account_ids.update(df[col].dropna().astype(str).map(clean_id).tolist())
+    if not account_ids:
+        return pd.DataFrame()
+
+    events = cash_events.copy() if cash_events is not None else pd.DataFrame(columns=["row_id"] + CASH_COLUMNS)
+    if not events.empty:
+        events["account_id"] = events["account_id"].map(clean_id)
+        events["date"] = pd.to_datetime(events["date"], errors="coerce").dt.date
+        events["amount"] = pd.to_numeric(events["amount"], errors="coerce").fillna(0.0)
+        events["annual_yield"] = events["annual_yield"].map(normalize_annual_yield)
+        events["event_type"] = events["event_type"].astype(str).str.upper().str.strip()
+        events["cash_label"] = events["cash_label"].astype(str).replace("", "Cash")
+
+    initial = _latest_initial_balance(events)
+    initial_map = {str(r["account_id"]): r for _, r in initial.iterrows()} if not initial.empty else {}
+
+    tx = transactions.copy() if transactions is not None else pd.DataFrame(columns=TX_COLUMNS)
+    if not tx.empty:
+        tx["account_id"] = tx["account_id"].map(clean_id)
+        tx["transaction_date"] = pd.to_datetime(tx["transaction_date"], errors="coerce").dt.date
+        tx["shares"] = pd.to_numeric(tx["shares"], errors="coerce").fillna(0.0)
+        tx["price"] = pd.to_numeric(tx["price"], errors="coerce").fillna(0.0)
+        tx["fee"] = pd.to_numeric(tx["fee"], errors="coerce").fillna(0.0)
+        tx["transaction_type"] = tx["transaction_type"].astype(str).str.upper().str.strip()
+
+    div = dividends.copy() if dividends is not None else pd.DataFrame(columns=DIV_COLUMNS)
+    if not div.empty:
+        div["account_id"] = div["account_id"].map(clean_id)
+        div["payment_date"] = pd.to_datetime(div["payment_date"], errors="coerce").dt.date
+        div["net_amount"] = pd.to_numeric(div["net_amount"], errors="coerce").fillna(0.0)
+
+    account_meta = account_lookup(accounts) if accounts is not None and not accounts.empty else {}
+    active_mv = pd.DataFrame(columns=["Account ID", "Invested Market Value"])
+    if holdings is not None and not holdings.empty:
+        active = holdings[holdings["Holding Status"] == "Active"].copy() if "Holding Status" in holdings.columns else holdings.copy()
+        if not active.empty:
+            active["Market Value"] = pd.to_numeric(active["Market Value"], errors="coerce").fillna(0.0)
+            active_mv = active.groupby("Account ID", as_index=False)["Market Value"].sum().rename(columns={"Market Value": "Invested Market Value"})
+    mv_map = dict(zip(active_mv["Account ID"].astype(str), active_mv["Invested Market Value"]))
+
+    rows: List[Dict[str, Any]] = []
+    today_ts = pd.Timestamp(TODAY)
+    ytd_start = date(TODAY.year, 1, 1)
+    for account_id in sorted(account_ids):
+        init = initial_map.get(account_id)
+        baseline_date = init["date"] if init is not None and not pd.isna(init["date"]) else None
+        starting_cash = safe_float(init["amount"], 0.0) if init is not None else 0.0
+        cash_label = str(init["cash_label"]) if init is not None and not _is_blank_like(init["cash_label"]) else "Cash"
+        annual_yield = normalize_annual_yield(init["annual_yield"]) if init is not None else 0.0
+
+        account_events = events[events["account_id"].astype(str) == account_id].copy() if not events.empty else pd.DataFrame()
+        if not account_events.empty:
+            nonblank_label = account_events[~account_events["cash_label"].map(_is_blank_like)].sort_values(["date", "row_id" if "row_id" in account_events.columns else "date"])
+            if not nonblank_label.empty:
+                cash_label = str(nonblank_label.iloc[-1]["cash_label"])
+            nonzero_yield = account_events[pd.to_numeric(account_events["annual_yield"], errors="coerce").fillna(0.0) != 0].sort_values(["date", "row_id" if "row_id" in account_events.columns else "date"])
+            if not nonzero_yield.empty:
+                annual_yield = normalize_annual_yield(nonzero_yield.iloc[-1]["annual_yield"])
+
+        def after_baseline(series: pd.Series) -> pd.Series:
+            if baseline_date is None:
+                return pd.Series(True, index=series.index)
+            return pd.to_datetime(series, errors="coerce").dt.date > baseline_date
+
+        tx_impact = 0.0
+        if not tx.empty:
+            tx_acc = tx[tx["account_id"].astype(str) == account_id].copy()
+            if not tx_acc.empty:
+                tx_acc = tx_acc[after_baseline(tx_acc["transaction_date"])]
+                buys = tx_acc[tx_acc["transaction_type"] == "BUY"]
+                sells = tx_acc[tx_acc["transaction_type"] == "SELL"]
+                tx_impact -= safe_float((buys["shares"] * buys["price"] + buys["fee"]).sum()) if not buys.empty else 0.0
+                tx_impact += safe_float((sells["shares"] * sells["price"] - sells["fee"]).sum()) if not sells.empty else 0.0
+
+        dividend_impact = 0.0
+        if not div.empty:
+            div_acc = div[div["account_id"].astype(str) == account_id].copy()
+            if not div_acc.empty:
+                div_acc = div_acc[after_baseline(div_acc["payment_date"])]
+                dividend_impact = safe_float(div_acc["net_amount"].sum())
+
+        cash_event_impact = 0.0
+        cash_interest_ytd = 0.0
+        cash_interest_last_12m = 0.0
+        last_cash_event = None
+        if not account_events.empty:
+            evt = account_events[account_events["event_type"] != "INITIAL_BALANCE"].copy()
+            if baseline_date is not None:
+                evt = evt[pd.to_datetime(evt["date"], errors="coerce").dt.date > baseline_date]
+            if not evt.empty:
+                evt["Impact"] = evt.apply(lambda r: _cash_event_impact(r["event_type"], r["amount"]), axis=1)
+                cash_event_impact = safe_float(evt["Impact"].sum())
+                interest = evt[evt["event_type"] == "INTEREST"].copy()
+                if not interest.empty:
+                    cash_interest_ytd = safe_float(interest.loc[pd.to_datetime(interest["date"], errors="coerce").dt.date >= ytd_start, "amount"].sum())
+                    cash_interest_last_12m = safe_float(interest.loc[pd.to_datetime(interest["date"], errors="coerce") >= today_ts - pd.Timedelta(days=365), "amount"].sum())
+                last_cash_event = evt.sort_values(["date", "row_id" if "row_id" in evt.columns else "date"]).iloc[-1]["date"]
+
+        current_cash = starting_cash + tx_impact + dividend_impact + cash_event_impact
+        invested_mv = safe_float(mv_map.get(account_id), 0.0)
+        total_account_value = invested_mv + current_cash
+        meta = account_meta.get(account_id, {})
+        rows.append({
+            "Account ID": account_id,
+            "owner": meta.get("owner", "Unmapped"),
+            "account_name": meta.get("account_name", account_id),
+            "tax_bucket": meta.get("tax_bucket", "Unclassified"),
+            "Cash Label": cash_label,
+            "Initial Balance Date": baseline_date,
+            "Initial Cash": starting_cash,
+            "Transaction Cash Impact": tx_impact,
+            "Dividend Cash Impact": dividend_impact,
+            "Cash Event Impact": cash_event_impact,
+            "Current Cash": current_cash,
+            "Cash Interest YTD": cash_interest_ytd,
+            "Cash Interest Last 12M": cash_interest_last_12m,
+            "Annual Yield": annual_yield,
+            "Estimated Annual Cash Interest": current_cash * annual_yield if current_cash > 0 else 0.0,
+            "Invested Market Value": invested_mv,
+            "Total Account Value": total_account_value,
+            "Account Cash Weight %": current_cash / total_account_value if total_account_value else np.nan,
+            "Last Cash Event": last_cash_event,
+        })
+    out = pd.DataFrame(rows)
+    return out.sort_values("Total Account Value", ascending=False) if not out.empty else out
+
+
+def apply_cash_summary(summary: Dict[str, float], cash_table: pd.DataFrame) -> Dict[str, float]:
+    out = dict(summary)
+    if cash_table is None or cash_table.empty:
+        out.update({
+            "cash_balance": 0.0,
+            "total_account_value": out.get("current_value", 0.0),
+            "cash_weight_pct": 0.0,
+            "cash_interest_ytd": 0.0,
+            "cash_interest_last_12m": 0.0,
+            "estimated_annual_cash_interest": 0.0,
+        })
+        return out
+    cash_balance = safe_float(cash_table["Current Cash"].sum()) if "Current Cash" in cash_table.columns else 0.0
+    total_account_value = safe_float(out.get("current_value", 0.0)) + cash_balance
+    out["cash_balance"] = cash_balance
+    out["total_account_value"] = total_account_value
+    out["cash_weight_pct"] = cash_balance / total_account_value if total_account_value else np.nan
+    out["cash_interest_ytd"] = safe_float(cash_table.get("Cash Interest YTD", pd.Series(dtype=float)).sum())
+    out["cash_interest_last_12m"] = safe_float(cash_table.get("Cash Interest Last 12M", pd.Series(dtype=float)).sum())
+    out["estimated_annual_cash_interest"] = safe_float(cash_table.get("Estimated Annual Cash Interest", pd.Series(dtype=float)).sum())
+    out["estimated_cash_yield"] = out["estimated_annual_cash_interest"] / cash_balance if cash_balance else np.nan
+    return out
+
+
+def add_cash_to_allocation_holdings(holdings: pd.DataFrame, cash_table: pd.DataFrame) -> pd.DataFrame:
+    base = holdings.copy() if holdings is not None else pd.DataFrame()
+    if cash_table is None or cash_table.empty:
+        return base
+    cash_rows = []
+    for _, row in cash_table.iterrows():
+        cash_balance = safe_float(row.get("Current Cash"), 0.0)
+        if cash_balance <= 1e-9:
+            continue
+        label = str(row.get("Cash Label", "Cash")).strip() or "Cash"
+        cash_rows.append({
+            "owner": row.get("owner", "Unmapped"),
+            "Account ID": row.get("Account ID"),
+            "account_name": row.get("account_name", row.get("Account ID")),
+            "tax_bucket": row.get("tax_bucket", "Unclassified"),
+            "Ticker": f"Cash / {label}",
+            "Shares": 0.0,
+            "Avg Buy Price": np.nan,
+            "Current Price": 1.0,
+            "Cost Basis": cash_balance,
+            "Market Value": cash_balance,
+            "Unrealized P/L": 0.0,
+            "Return %": np.nan,
+            "Realized P/L": 0.0,
+            "Actual Dividends": 0.0,
+            "Total Return incl. Dividends": 0.0,
+            "Portfolio Weight %": 0.0,
+            "Estimated Annual Dividend": 0.0,
+            "Yield on Cost": np.nan,
+            "Current Yield": np.nan,
+            "Dividend Frequency": "Cash",
+            "Dividend Status": "Cash / Sweep",
+            "Holding Status": "Active",
+        })
+    if not cash_rows:
+        return base
+    return pd.concat([base, pd.DataFrame(cash_rows)], ignore_index=True, sort=False)
 
 # ============================================================
 # Charts
@@ -2002,6 +2339,7 @@ def render_header(last_refresh: str) -> None:
         <div class="meta-box">
             <b>Portfolio Source:</b> {st.session_state.get('portfolio_source', 'unknown')} &nbsp; | &nbsp;
             <b>Dividend Source:</b> {st.session_state.get('dividends_source', 'unknown')} &nbsp; | &nbsp;
+            <b>Cash Source:</b> {st.session_state.get('cash_events_source', 'unknown')} &nbsp; | &nbsp;
             <b>Accounts Source:</b> {st.session_state.get('accounts_source', 'unknown')}<br>
             <b>Last Online Refresh:</b> {last_refresh} &nbsp; | &nbsp;
             <b>Price Source:</b> yfinance &nbsp; | &nbsp;
@@ -2161,7 +2499,7 @@ def style_money_table(df: pd.DataFrame, height: int = 430) -> None:
     formatters = {}
     for c in df.columns:
         low = c.lower()
-        if any(k in low for k in ["value", "cost", "price", "p/l", "dividend", "proceeds", "amount", "basis"]):
+        if any(k in low for k in ["value", "cost", "price", "p/l", "dividend", "proceeds", "amount", "basis", "cash", "interest", "balance", "impact"]):
             formatters[c] = fmt_currency
         if "%" in c or "yield" in low or ("return" in low and c.endswith("%")) or "weight" in low:
             formatters[c] = fmt_pct
@@ -2197,7 +2535,7 @@ def render_sidebar(accounts_clean: pd.DataFrame, tx_clean: pd.DataFrame) -> Dict
         "Auto refresh interval (seconds)",
         min_value=5,
         max_value=3600,
-        value=30,
+        value=10,
         step=5,
         disabled=not auto_refresh_enabled,
         help="Default is 10 seconds. Auto refresh is disabled on first load.",
@@ -2297,6 +2635,28 @@ def render_sidebar(accounts_clean: pd.DataFrame, tx_clean: pd.DataFrame) -> Dict
                 st.session_state.dividends_signature = f"sample_dividends::{datetime.now(ET).timestamp()}"
                 st.rerun()
 
+        uploaded_cash = st.file_uploader("Upload cash_events.csv", type=["csv"], key="cash_events_uploader")
+        if uploaded_cash is not None:
+            try:
+                st.session_state.cash_events_df = drop_fully_empty_rows(pd.read_csv(uploaded_cash))
+                st.session_state.cash_events_source = getattr(uploaded_cash, "name", "uploaded cash_events.csv")
+                st.session_state.cash_events_source_type = "uploaded"
+                st.session_state.cash_events_signature = f"uploaded::{datetime.now(ET).timestamp()}"
+            except Exception as exc:
+                st.error(f"Could not read uploaded cash events CSV: {exc}")
+        col_g, col_h = st.columns(2)
+        with col_g:
+            if st.button("Reload cash_events.csv", use_container_width=True):
+                load_file_into_session("cash_events")
+                st.rerun()
+        with col_h:
+            if st.button("Use sample cash events", use_container_width=True):
+                st.session_state.cash_events_df = embedded_sample_df("cash_events")
+                st.session_state.cash_events_source = "embedded sample_cash_events.csv"
+                st.session_state.cash_events_source_type = "embedded_sample_cash_events"
+                st.session_state.cash_events_signature = f"sample_cash_events::{datetime.now(ET).timestamp()}"
+                st.rerun()
+
     active_accounts = accounts_clean[accounts_clean["is_active"] == True].copy() if accounts_clean is not None and not accounts_clean.empty else pd.DataFrame()
     owners = sorted(active_accounts["owner"].dropna().astype(str).unique().tolist()) if not active_accounts.empty else []
     tax_buckets = sorted(active_accounts["tax_bucket"].dropna().astype(str).unique().tolist()) if not active_accounts.empty else []
@@ -2338,7 +2698,7 @@ def render_sidebar(accounts_clean: pd.DataFrame, tx_clean: pd.DataFrame) -> Dict
 # ============================================================
 
 
-def render_overview(holdings: pd.DataFrame, realized_df: pd.DataFrame, dividends: pd.DataFrame, upcoming: pd.DataFrame, summary: Dict[str, float], concentration_threshold: float) -> None:
+def render_overview(holdings: pd.DataFrame, realized_df: pd.DataFrame, dividends: pd.DataFrame, upcoming: pd.DataFrame, summary: Dict[str, float], concentration_threshold: float, cash_table: pd.DataFrame) -> None:
     render_version_banner()
     st.subheader("Portfolio Summary")
     c1, c2, c3, c4 = st.columns(4)
@@ -2364,7 +2724,19 @@ def render_overview(holdings: pd.DataFrame, realized_df: pd.DataFrame, dividends
     with d4:
         render_kpi_card("Estimated Annual Dividend", fmt_currency_with_pct(summary["estimated_annual_dividend"], summary.get("estimated_dividend_yield"), signed=False), "Estimated, not guaranteed", "blue")
 
+    st.markdown('<div class="kpi-row-gap"></div>', unsafe_allow_html=True)
+    e1, e2, e3, e4 = st.columns(4)
+    with e1:
+        render_kpi_card("Cash Balance", fmt_currency(summary.get("cash_balance", 0.0)), "Calculated from cash events + post-baseline activity", "blue")
+    with e2:
+        render_kpi_card("Total Account Value", fmt_currency(summary.get("total_account_value", summary.get("current_value", 0.0))), "Invested market value + cash")
+    with e3:
+        render_kpi_card("Cash Weight", fmt_pct(summary.get("cash_weight_pct"), signed=False), "Cash / total account value", "blue")
+    with e4:
+        render_kpi_card("Est. Annual Cash Interest", fmt_currency_with_pct(summary.get("estimated_annual_cash_interest", 0.0), summary.get("estimated_cash_yield"), signed=False), "Cash balance × annual yield", "blue")
+
     exp = exposure_by_ticker(holdings)
+    allocation_holdings = add_cash_to_allocation_holdings(holdings, cash_table)
     if not exp.empty:
         concentrated = exp[exp["Household Weight %"] >= concentration_threshold]
         if not concentrated.empty:
@@ -2373,12 +2745,12 @@ def render_overview(holdings: pd.DataFrame, realized_df: pd.DataFrame, dividends
 
     a, b = st.columns(2)
     with a:
-        st.plotly_chart(make_allocation_chart(holdings, "Ticker", "Allocation by Ticker"), use_container_width=True, key="overview_allocation_ticker")
+        st.plotly_chart(make_allocation_chart(allocation_holdings, "Ticker", "Allocation by Ticker incl. Cash"), use_container_width=True, key="overview_allocation_ticker")
     with b:
-        st.plotly_chart(make_allocation_chart(holdings, "tax_bucket", "Allocation by Tax Bucket"), use_container_width=True, key="overview_allocation_tax")
+        st.plotly_chart(make_allocation_chart(allocation_holdings, "tax_bucket", "Allocation by Tax Bucket incl. Cash"), use_container_width=True, key="overview_allocation_tax")
 
     st.plotly_chart(
-        make_account_allocation_donut_chart(holdings, "Ticker", "Account ID-Level Allocation by Ticker"),
+        make_account_allocation_donut_chart(allocation_holdings, "Ticker", "Account ID-Level Allocation by Ticker incl. Cash"),
         use_container_width=True,
         key="overview_account_allocation_ticker",
     )
@@ -2392,6 +2764,15 @@ def render_overview(holdings: pd.DataFrame, realized_df: pd.DataFrame, dividends
 
     st.markdown("### Household Holding Exposure")
     style_money_table(exp, height=320)
+
+    st.markdown("### Household Cash Exposure")
+    cash_cols = [
+        "Account ID", "Cash Label", "Initial Balance Date", "Initial Cash", "Transaction Cash Impact",
+        "Dividend Cash Impact", "Cash Event Impact", "Current Cash", "Cash Interest YTD",
+        "Cash Interest Last 12M", "Annual Yield", "Estimated Annual Cash Interest",
+        "Invested Market Value", "Total Account Value", "Account Cash Weight %", "Last Cash Event",
+    ]
+    style_money_table(cash_table[[c for c in cash_cols if c in cash_table.columns]] if cash_table is not None and not cash_table.empty else pd.DataFrame(), height=320)
 
 
 def render_accounts_tab(holdings: pd.DataFrame, accounts: pd.DataFrame, dividends: pd.DataFrame) -> None:
@@ -2514,7 +2895,7 @@ def render_price_tab(transactions: pd.DataFrame, holdings: pd.DataFrame, online_
     st.plotly_chart(make_drawdown_chart(tickers, online_data), use_container_width=True, key="price_drawdown_chart")
 
 
-def render_data_manager(accounts_clean: pd.DataFrame, tx_clean: pd.DataFrame, div_clean: pd.DataFrame, data_quality: pd.DataFrame) -> None:
+def render_data_manager(accounts_clean: pd.DataFrame, tx_clean: pd.DataFrame, div_clean: pd.DataFrame, cash_clean: pd.DataFrame, data_quality: pd.DataFrame) -> None:
     st.subheader("Data Manager")
     st.markdown("### Data Quality Check")
     st.caption("Review data quality issues before editing account, transaction, or dividend CSV data.")
@@ -2733,13 +3114,92 @@ def render_data_manager(accounts_clean: pd.DataFrame, tx_clean: pd.DataFrame, di
             st.rerun()
 
     st.markdown("---")
+    st.markdown("### Cash Events Manager")
+    st.caption("Use INITIAL_BALANCE once per account as the current SPAXX/cash baseline. BUY/SELL and dividends after that date are reflected automatically.")
+    st.code("date,account_id,event_type,amount,cash_label,annual_yield,note", language="text")
+    cash_base = cash_clean[CASH_COLUMNS].copy() if cash_clean is not None and not cash_clean.empty else pd.DataFrame(columns=CASH_COLUMNS)
+    edited_cash = st.data_editor(
+        cash_base,
+        use_container_width=True,
+        num_rows="dynamic",
+        height=300,
+        column_config={
+            "date": st.column_config.DateColumn("date", format="YYYY-MM-DD"),
+            "account_id": st.column_config.SelectboxColumn("account_id", options=account_ids),
+            "event_type": st.column_config.SelectboxColumn("event_type", options=CASH_EVENT_TYPES),
+            "amount": st.column_config.NumberColumn("amount", step=0.01, format="%.4f"),
+            "cash_label": st.column_config.TextColumn("cash_label"),
+            "annual_yield": st.column_config.NumberColumn("annual_yield", step=0.0001, format="%.4f"),
+            "note": st.column_config.TextColumn("note"),
+        },
+        key="cash_events_editor",
+    )
+    ce1, ce2, ce3 = st.columns(3)
+    with ce1:
+        if st.button("Apply Edited Cash Events", type="primary", use_container_width=True):
+            normalized, _ = migrate_cash_event_schema(drop_fully_empty_rows(edited_cash))
+            normalized["account_id"] = normalized["account_id"].map(clean_id)
+            normalized["event_type"] = normalized["event_type"].astype("string").fillna("").str.strip().str.upper()
+            normalized["annual_yield"] = normalized["annual_yield"].map(normalize_annual_yield)
+            st.session_state.cash_events_df = normalized
+            st.session_state.cash_events_source = "edited in Data Manager"
+            st.session_state.cash_events_source_type = "edited"
+            st.session_state.cash_events_signature = f"edited_cash_events::{datetime.now(ET).timestamp()}"
+            st.success("Edited cash events applied.")
+            st.rerun()
+    with ce2:
+        st.download_button("Download cash_events.csv", data=to_csv_bytes(migrate_cash_event_schema(drop_fully_empty_rows(edited_cash))[0]), file_name=CASH_EVENTS_CSV_NAME, mime="text/csv", use_container_width=True)
+    with ce3:
+        if st.button("Save to local cash_events.csv", use_container_width=True):
+            try:
+                migrate_cash_event_schema(drop_fully_empty_rows(edited_cash))[0].to_csv(BASE_DIR / CASH_EVENTS_CSV_NAME, index=False, encoding="utf-8-sig")
+                load_file_into_session("cash_events")
+                st.success("Saved cash_events.csv locally.")
+                st.rerun()
+            except Exception as exc:
+                st.error(f"Could not save cash_events.csv: {exc}")
+
+    st.markdown("### Add New Cash Event")
+    with st.form("add_cash_event_form", clear_on_submit=True):
+        ca1, ca2, ca3, ca4 = st.columns(4)
+        with ca1:
+            new_cash_date = st.date_input("Cash Event Date", value=TODAY, key="new_cash_date")
+            new_cash_account_id = st.selectbox("Cash Account ID", account_ids)
+        with ca2:
+            new_cash_event_type = st.selectbox("Cash Event Type", CASH_EVENT_TYPES)
+            new_cash_label = st.text_input("Cash Label", value="SPAXX")
+        with ca3:
+            new_cash_amount = st.number_input("Cash Amount", value=0.01, step=0.01, format="%.4f")
+            new_cash_yield = st.number_input("Annual Yield", value=0.0349, step=0.0001, format="%.4f")
+        with ca4:
+            new_cash_note = st.text_input("Cash Note", value="")
+        if st.form_submit_button("Add Cash Event", type="primary"):
+            row = pd.DataFrame([{
+                "date": new_cash_date,
+                "account_id": new_cash_account_id,
+                "event_type": new_cash_event_type,
+                "amount": new_cash_amount,
+                "cash_label": new_cash_label,
+                "annual_yield": normalize_annual_yield(new_cash_yield),
+                "note": new_cash_note,
+            }])
+            current, _ = migrate_cash_event_schema(drop_fully_empty_rows(st.session_state.cash_events_df))
+            st.session_state.cash_events_df = pd.concat([current, row], ignore_index=True)
+            st.session_state.cash_events_source = "edited in Data Manager"
+            st.session_state.cash_events_source_type = "edited"
+            st.session_state.cash_events_signature = f"edited_cash_events::{datetime.now(ET).timestamp()}"
+            st.success("New cash event added.")
+            st.rerun()
+
+    st.markdown("---")
     st.markdown("### Migration Notes")
     st.markdown(
         """
         - `accounts.csv` is the account master. Do not use real account numbers; use aliases such as `ME_FID_ROTH`.
         - `portfolio.csv` uses `account_id` and stores only `BUY` / `SELL` transactions.
         - `dividends.csv` uses `account_id` and stores actual net dividend payments.
-        - Legacy `account` columns are migrated to `account_id` in session.
+        - `cash_events.csv` stores account-level cash baselines, external cash events, and sweep/MMF interest such as SPAXX.
+        - `INITIAL_BALANCE` is treated as the confirmed cash balance on that date; earlier BUY/SELL/dividend activity is excluded from cash calculations.
         - SELL transactions use positive shares and are FIFO-matched within the same `account_id + ticker`.
         - Closed positions are hidden by default, excluded from future dividend projections, and included in realized/dividend-inclusive performance.
         """
@@ -2757,6 +3217,7 @@ def main() -> None:
     tx_clean, tx_quality, tx_valid_mask, tx_migrated = clean_and_validate_transactions(st.session_state.portfolio_df, valid_account_ids)
     known_tickers = tx_clean["ticker"].dropna().astype(str).unique().tolist() if not tx_clean.empty else []
     div_clean, div_quality, div_valid_mask, div_migrated = clean_and_validate_dividends(st.session_state.dividends_df, valid_account_ids, known_tickers)
+    cash_clean, cash_quality, cash_valid_mask, cash_migrated = clean_and_validate_cash_events(st.session_state.cash_events_df, valid_account_ids)
 
     st.session_state["_accounts_clean"] = accounts_clean
     controls = render_sidebar(accounts_clean, tx_clean)
@@ -2766,6 +3227,12 @@ def main() -> None:
     div_valid = div_clean.loc[div_valid_mask].copy() if not div_valid_mask.empty else pd.DataFrame(columns=DIV_COLUMNS)
     filtered_tx = filter_frame_by_controls(tx_valid, controls)
     filtered_div = filtered_dividends(div_valid, controls)
+    cash_valid = cash_clean.loc[cash_valid_mask].copy() if not cash_valid_mask.empty else pd.DataFrame(columns=CASH_COLUMNS)
+    cash_controls = dict(controls)
+    cash_controls["tickers"] = []
+    filtered_tx_for_cash = filter_frame_by_controls(tx_valid, cash_controls)
+    filtered_div_for_cash = filtered_dividends(div_valid, cash_controls)
+    filtered_cash = filtered_cash_events(cash_valid, cash_controls)
     filtered_accounts = accounts_clean.copy()
     if controls.get("owners"):
         filtered_accounts = filtered_accounts[filtered_accounts["owner"].astype(str).isin(controls["owners"])]
@@ -2783,16 +3250,18 @@ def main() -> None:
             st.session_state.last_online_refresh = now_et_str()
 
     tx_detail, realized_df, holdings, dividend_analysis, summary = build_portfolio_tables(filtered_tx, filtered_div, filtered_accounts, online_data, controls["dividend_mode"])
+    cash_table = build_cash_table(filtered_cash, filtered_tx_for_cash, filtered_div_for_cash, filtered_accounts, holdings)
+    summary = apply_cash_summary(summary, cash_table)
     upcoming = build_upcoming_dividends(holdings, dividend_analysis, days=90)
 
-    quality_frames = [q for q in [account_quality, tx_quality, div_quality, online_quality] if q is not None and not q.empty]
+    quality_frames = [q for q in [account_quality, tx_quality, div_quality, cash_quality, online_quality] if q is not None and not q.empty]
     data_quality = pd.concat(quality_frames, ignore_index=True) if quality_frames else pd.DataFrame(columns=["Severity", "Row", "Column", "Raw Value", "Issue"])
 
     render_header(st.session_state.last_online_refresh)
 
     tabs = st.tabs(["Overview", "Accounts", "Holdings", "Realized P/L", "Dividend", "Price Trend", "Data Manager"])
     with tabs[0]:
-        render_overview(holdings, realized_df, filtered_div, upcoming, summary, controls["concentration_threshold"])
+        render_overview(holdings, realized_df, filtered_div, upcoming, summary, controls["concentration_threshold"], cash_table)
     with tabs[1]:
         render_accounts_tab(holdings, filtered_accounts, filtered_div)
     with tabs[2]:
@@ -2804,7 +3273,7 @@ def main() -> None:
     with tabs[5]:
         render_price_tab(filtered_tx, holdings, online_data, controls["benchmark"])
     with tabs[6]:
-        render_data_manager(accounts_clean, tx_clean, div_clean, data_quality)
+        render_data_manager(accounts_clean, tx_clean, div_clean, cash_clean, data_quality)
 
 
 if __name__ == "__main__":
