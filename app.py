@@ -28,7 +28,7 @@ from zoneinfo import ZoneInfo
 
 APP_TITLE = "Household Wealth Tracker"
 CREATOR_NAME = "Eucalyptuss"
-APP_VERSION = "1.0.24"
+APP_VERSION = "1.0.25"
 BASE_DIR = Path(__file__).resolve().parent
 ET = ZoneInfo("America/New_York")
 TODAY = datetime.now(ET).date()
@@ -150,6 +150,24 @@ def inject_css() -> None:
             background-color: var(--hwt-bg);
         }
         .main .block-container { padding-top: 1.2rem; padding-bottom: 2rem; }
+        @media (max-width: 900px) {
+            div[data-testid="stHorizontalBlock"] {
+                flex-wrap: wrap !important;
+                gap: 0.75rem !important;
+            }
+            div[data-testid="stHorizontalBlock"] > div[data-testid="column"] {
+                flex: 1 1 260px !important;
+                min-width: min(100%, 260px) !important;
+                max-width: 100% !important;
+            }
+        }
+        @media (max-width: 560px) {
+            div[data-testid="stHorizontalBlock"] > div[data-testid="column"] {
+                flex-basis: 100% !important;
+                min-width: 100% !important;
+                width: 100% !important;
+            }
+        }
         .dashboard-title { color: var(--hwt-text) !important; font-size: 2.05rem; font-weight: 850; line-height: 1.15; letter-spacing: -0.02em; margin-bottom: 0.2rem; }
         .dashboard-subtitle { color: var(--hwt-muted) !important; font-size: 0.96rem; margin-bottom: 1rem; }
         .meta-box { color: var(--hwt-text) !important; border: 1px solid var(--hwt-border); border-radius: 16px; padding: 0.8rem 1rem; background: var(--hwt-soft-bg); margin-bottom: 1rem; font-size: 0.92rem; }
@@ -1906,24 +1924,22 @@ def make_allocation_chart(holdings: pd.DataFrame, field: str = "Ticker", title: 
     return apply_chart_theme(fig, height=420, legend_title=chart_label(field), top=76, bottom=54, left=42, right=78)
 
 
-def make_account_allocation_donut_chart(
-    holdings: pd.DataFrame,
-    field: str = "Ticker",
-    title: str = "Allocation by Account ID",
-    max_accounts: Optional[int] = None,
-) -> go.Figure:
-    """Render account_id-level donut charts for ticker or tax bucket allocation.
-
-    Each donut represents one account_id. Account names are not used as the grouping key,
-    so two accounts with similar display names remain separated by their account_id.
-    """
+def _account_allocation_active_data(holdings: pd.DataFrame, field: str) -> pd.DataFrame:
+    """Return active account-level allocation rows with positive market value."""
     if holdings is None or holdings.empty or field not in holdings.columns or "Account ID" not in holdings.columns:
-        return labeled_empty_figure(title, chart_label(field), "Market Value ($)")
-    active = holdings[holdings["Holding Status"] == "Active"].copy()
-    active = active[pd.to_numeric(active["Market Value"], errors="coerce").fillna(0.0) > 0]
-    if active.empty:
-        return labeled_empty_figure(title, chart_label(field), "Market Value ($)")
+        return pd.DataFrame()
+    active = holdings[holdings["Holding Status"] == "Active"].copy() if "Holding Status" in holdings.columns else holdings.copy()
+    if "Market Value" not in active.columns:
+        return pd.DataFrame()
+    active["Market Value"] = pd.to_numeric(active["Market Value"], errors="coerce").fillna(0.0)
+    active = active[active["Market Value"] > 0].copy()
+    return active
 
+
+def _account_allocation_order(active: pd.DataFrame, max_accounts: Optional[int] = None) -> List[str]:
+    """Order Account IDs by total market value for account-level donut rendering."""
+    if active is None or active.empty or "Account ID" not in active.columns:
+        return []
     account_order = (
         active.groupby("Account ID", as_index=False)["Market Value"]
         .sum()
@@ -1933,18 +1949,82 @@ def make_account_allocation_donut_chart(
     )
     if max_accounts is not None:
         account_order = account_order[:max_accounts]
+    return account_order
+
+
+def make_single_account_allocation_donut_chart(active: pd.DataFrame, account_id: str, field: str = "Ticker") -> go.Figure:
+    """Render one Account ID allocation donut.
+
+    v1.0.25 intentionally renders one Plotly chart per account instead of one large
+    subplot figure. Streamlit/CSS can then wrap the account cards on tablets and
+    phones, preventing all account donuts from being squeezed into one mobile row.
+    """
+    account_title = compact_account_id(account_id, max_len=18)
+    if active is None or active.empty or field not in active.columns:
+        return labeled_empty_figure(account_title, chart_label(field), "Market Value ($)")
+
+    subset = active[active["Account ID"].astype(str) == str(account_id)].copy()
+    if subset.empty:
+        return labeled_empty_figure(account_title, chart_label(field), "Market Value ($)")
+
+    if field == "Ticker" and "Shares" in subset.columns:
+        grouped = (
+            subset.groupby(field, as_index=False)
+            .agg({"Market Value": "sum", "Shares": "sum"})
+            .sort_values("Market Value", ascending=False)
+        )
+        customdata = np.stack([
+            pd.to_numeric(grouped["Shares"], errors="coerce").fillna(0.0),
+        ], axis=-1)
+    else:
+        grouped = subset.groupby(field, as_index=False)["Market Value"].sum().sort_values("Market Value", ascending=False)
+        customdata = None
+
+    fig = go.Figure(
+        data=[
+            go.Pie(
+                labels=grouped[field],
+                values=grouped["Market Value"],
+                hole=0.48,
+                name=str(account_id),
+                textinfo="none",
+                texttemplate=_pie_texttemplate(field, show_account_count=False),
+                textposition="inside",
+                insidetextorientation="horizontal",
+                customdata=customdata,
+                hovertemplate=_pie_hovertemplate(field, account_id, include_account_count=False),
+                showlegend=False,
+            )
+        ]
+    )
+    fig.update_layout(title=account_title, uniformtext_minsize=8, uniformtext_mode="show")
+    return apply_chart_theme(fig, height=345, legend_title=chart_label(field), top=58, bottom=34, left=14, right=14)
+
+
+def make_account_allocation_donut_chart(
+    holdings: pd.DataFrame,
+    field: str = "Ticker",
+    title: str = "Allocation by Account ID",
+    max_accounts: Optional[int] = None,
+) -> go.Figure:
+    """Backward-compatible fallback summary figure for account allocation.
+
+    The Overview tab now uses render_account_allocation_donut_grid() for responsive
+    mobile behavior. This fallback remains available if another page needs a single
+    Plotly figure.
+    """
+    active = _account_allocation_active_data(holdings, field)
+    if active.empty:
+        return labeled_empty_figure(title, chart_label(field), "Market Value ($)")
+
+    account_order = _account_allocation_order(active, max_accounts=max_accounts)
     if not account_order:
         return labeled_empty_figure(title, chart_label(field), "Market Value ($)")
 
-    # Layout rule for Account ID-level donuts:
-    # - 1 to 4 accounts: show all donuts in a single row.
-    # - 5 or more accounts: use two rows and distribute accounts across columns.
-    # This avoids the previous fixed 2-column layout and makes better use of the
-    # full-width Overview area.
     account_count = len(account_order)
     rows = 1 if account_count <= 4 else 2
     cols = account_count if rows == 1 else int(math.ceil(account_count / rows))
-    subplot_titles = [_short_label(account_id, 32) for account_id in account_order]
+    subplot_titles = [compact_account_id(account_id, max_len=18) for account_id in account_order]
     fig = make_subplots(
         rows=rows,
         cols=cols,
@@ -1964,9 +2044,7 @@ def make_account_allocation_donut_chart(
                 .agg({"Market Value": "sum", "Shares": "sum"})
                 .sort_values("Market Value", ascending=False)
             )
-            customdata = np.stack([
-                pd.to_numeric(grouped["Shares"], errors="coerce").fillna(0.0),
-            ], axis=-1)
+            customdata = np.stack([pd.to_numeric(grouped["Shares"], errors="coerce").fillna(0.0)], axis=-1)
         else:
             grouped = subset.groupby(field, as_index=False)["Market Value"].sum().sort_values("Market Value", ascending=False)
             customdata = None
@@ -1992,6 +2070,51 @@ def make_account_allocation_donut_chart(
     fig.update_layout(title=title, uniformtext_minsize=8, uniformtext_mode="show")
     fig.update_annotations(font_size=11 if cols >= 4 else 12)
     return apply_chart_theme(fig, height=dynamic_height, legend_title=chart_label(field), top=86, bottom=54, left=30, right=30)
+
+
+def render_account_allocation_donut_grid(
+    holdings: pd.DataFrame,
+    field: str = "Ticker",
+    title: str = "Allocation by Account ID",
+    max_accounts: Optional[int] = None,
+    key_prefix: str = "account_allocation",
+) -> None:
+    """Render Account ID-level donut charts with a responsive mobile-friendly layout.
+
+    Desktop rule remains the same as v1.0.21:
+    - 1 to 4 account charts: one row.
+    - 5+ account charts: two rows.
+
+    v1.0.25 change:
+    - Each account is rendered as its own Streamlit/Plotly chart instead of one
+      fixed subplot. The CSS media query can then wrap columns as the screen
+      narrows, down to one chart per row on small mobile screens.
+    """
+    active = _account_allocation_active_data(holdings, field)
+    if active.empty:
+        st.plotly_chart(labeled_empty_figure(title, chart_label(field), "Market Value ($)"), use_container_width=True, key=f"{key_prefix}_empty")
+        return
+
+    account_order = _account_allocation_order(active, max_accounts=max_accounts)
+    if not account_order:
+        st.plotly_chart(labeled_empty_figure(title, chart_label(field), "Market Value ($)"), use_container_width=True, key=f"{key_prefix}_empty_order")
+        return
+
+    st.markdown(f"### {html.escape(title)}")
+    account_count = len(account_order)
+    rows = 1 if account_count <= 4 else 2
+    cols = account_count if rows == 1 else int(math.ceil(account_count / rows))
+
+    for row_idx in range(rows):
+        start = row_idx * cols
+        row_accounts = account_order[start:start + cols]
+        if not row_accounts:
+            continue
+        chart_columns = st.columns(len(row_accounts), gap="small")
+        for i, (col, account_id) in enumerate(zip(chart_columns, row_accounts), start=start):
+            with col:
+                fig = make_single_account_allocation_donut_chart(active, str(account_id), field)
+                st.plotly_chart(fig, use_container_width=True, key=f"{key_prefix}_{i}")
 
 
 def make_bar_chart(df: pd.DataFrame, x: str, y: str, title: str, color: Optional[str] = None) -> go.Figure:
@@ -2760,10 +2883,11 @@ def render_overview(holdings: pd.DataFrame, realized_df: pd.DataFrame, dividends
     with b:
         st.plotly_chart(make_allocation_chart(allocation_holdings, "tax_bucket", "Allocation by Tax Bucket incl. Cash"), use_container_width=True, key="overview_allocation_tax")
 
-    st.plotly_chart(
-        make_account_allocation_donut_chart(allocation_holdings, "Ticker", "Account ID-Level Allocation by Ticker incl. Cash"),
-        use_container_width=True,
-        key="overview_account_allocation_ticker",
+    render_account_allocation_donut_grid(
+        allocation_holdings,
+        "Ticker",
+        "Account ID-Level Allocation by Ticker incl. Cash",
+        key_prefix="overview_account_allocation_ticker",
     )
 
     lower_row_height = top_movers_chart_height(holdings)
