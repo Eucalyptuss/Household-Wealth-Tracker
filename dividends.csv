@@ -33,3 +33,6 @@ payment_date,ticker,net_amount,account_id,note
 2026-09-25,SPHD,3.63,SP_FID_TRA_IRA,monthly dividend
 2026-09-29,TQQQ,0.16,ME_FID_TRA_IRA,monthly dividend
 2026-10-05,VGIT,2.65,ME_FID_TRA_IRA,monthly dividend
+2026-10-05,VGIT,2.65,SP_FID_TRA_IRA,monthly dividend
+2026-10-06,SGOV,1.2,ME_FID_TRA_IRA,monthly dividend
+2026-10-06,SGOV,0.9,SP_FID_TRA_IRA,monthly dividend
