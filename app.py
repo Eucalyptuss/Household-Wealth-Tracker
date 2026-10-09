@@ -28,7 +28,7 @@ from zoneinfo import ZoneInfo
 
 APP_TITLE = "Household Wealth Tracker"
 CREATOR_NAME = "Eucalyptuss"
-APP_VERSION = "1.0.25"
+APP_VERSION = "1.0.26"
 BASE_DIR = Path(__file__).resolve().parent
 ET = ZoneInfo("America/New_York")
 TODAY = datetime.now(ET).date()
@@ -1251,6 +1251,84 @@ def group_summary(holdings: pd.DataFrame, group_col: str) -> pd.DataFrame:
     return df.sort_values("Market Value", ascending=False)
 
 
+def tax_bucket_performance_table(holdings: pd.DataFrame, cash_table: pd.DataFrame) -> pd.DataFrame:
+    """Summarize profit amount and return ratio by Tax Bucket for the Overview tab.
+
+    Investment return metrics are calculated from holdings only because cash/sweep
+    balances do not have a cost basis comparable to ETF/stock positions. Cash
+    balance and cash interest are shown alongside the investment metrics so the
+    Taxable vs Retirement view still reflects total account context.
+    """
+    investment = group_summary(holdings, "tax_bucket")
+    if investment is None or investment.empty:
+        investment = pd.DataFrame(columns=[
+            "tax_bucket", "Cost Basis", "Market Value", "Unrealized P/L",
+            "Realized P/L", "Actual Dividends", "Total Return incl. Dividends",
+            "Estimated Annual Dividend", "Return incl. Dividends %",
+        ])
+
+    perf = investment.copy()
+    for col in [
+        "Cost Basis", "Market Value", "Unrealized P/L", "Realized P/L",
+        "Actual Dividends", "Total Return incl. Dividends", "Estimated Annual Dividend",
+    ]:
+        if col not in perf.columns:
+            perf[col] = 0.0
+        perf[col] = pd.to_numeric(perf[col], errors="coerce").fillna(0.0)
+
+    if "tax_bucket" not in perf.columns:
+        perf["tax_bucket"] = "Unclassified"
+    perf["Unrealized Return %"] = np.where(perf["Cost Basis"] > 0, perf["Unrealized P/L"] / perf["Cost Basis"], np.nan)
+    perf["Return incl. Dividends %"] = np.where(perf["Cost Basis"] > 0, perf["Total Return incl. Dividends"] / perf["Cost Basis"], np.nan)
+
+    if cash_table is not None and not cash_table.empty and "tax_bucket" in cash_table.columns:
+        cash = cash_table.copy()
+        for col in ["Current Cash", "Cash Interest YTD", "Estimated Annual Cash Interest", "Total Account Value"]:
+            if col not in cash.columns:
+                cash[col] = 0.0
+            cash[col] = pd.to_numeric(cash[col], errors="coerce").fillna(0.0)
+        cash_group = cash.groupby("tax_bucket", as_index=False).agg({
+            "Current Cash": "sum",
+            "Cash Interest YTD": "sum",
+            "Estimated Annual Cash Interest": "sum",
+            "Total Account Value": "sum",
+        })
+    else:
+        cash_group = pd.DataFrame(columns=["tax_bucket", "Current Cash", "Cash Interest YTD", "Estimated Annual Cash Interest", "Total Account Value"])
+
+    all_buckets = sorted(set(perf["tax_bucket"].dropna().astype(str).tolist()) | set(cash_group["tax_bucket"].dropna().astype(str).tolist()))
+    if not all_buckets:
+        return pd.DataFrame()
+
+    base = pd.DataFrame({"tax_bucket": all_buckets})
+    base = base.merge(perf, on="tax_bucket", how="left")
+    base = base.merge(cash_group, on="tax_bucket", how="left")
+    numeric_cols = [c for c in base.columns if c != "tax_bucket"]
+    for col in numeric_cols:
+        base[col] = pd.to_numeric(base[col], errors="coerce")
+        if "%" not in col and "Return" not in col:
+            base[col] = base[col].fillna(0.0)
+
+    base["Invested + Cash Value"] = base["Market Value"].fillna(0.0) + base["Current Cash"].fillna(0.0)
+    ordered_cols = [
+        "tax_bucket",
+        "Cost Basis",
+        "Market Value",
+        "Current Cash",
+        "Invested + Cash Value",
+        "Unrealized P/L",
+        "Unrealized Return %",
+        "Realized P/L",
+        "Actual Dividends",
+        "Total Return incl. Dividends",
+        "Return incl. Dividends %",
+        "Cash Interest YTD",
+        "Estimated Annual Cash Interest",
+        "Estimated Annual Dividend",
+    ]
+    return base[[c for c in ordered_cols if c in base.columns]].sort_values("Invested + Cash Value", ascending=False)
+
+
 def exposure_by_ticker(holdings: pd.DataFrame) -> pd.DataFrame:
     """Aggregate active household exposure by ticker.
 
@@ -1625,6 +1703,8 @@ CHART_LABELS = {
     "Actual Dividends": "Actual Dividends ($)",
     "Estimated Dividend Amount": "Estimated Dividend Amount ($)",
     "Return %": "Return (%)",
+    "Unrealized Return %": "Unrealized Return (%)",
+    "Return incl. Dividends %": "Return incl. Dividends (%)",
     "Dividend Yield": "Dividend Yield (%)",
     "Month": "Month",
     "payment_date": "Payment Date",
@@ -2457,7 +2537,13 @@ def render_version_banner() -> None:
 
 def render_header(last_refresh: str) -> None:
     st.markdown(f"<div class='dashboard-title'>{APP_TITLE}</div>", unsafe_allow_html=True)
-    st.markdown("<div class='dashboard-subtitle'>Household-level wealth tracker for investment holdings, BUY/SELL FIFO, actual dividends, and multi-account views.</div>", unsafe_allow_html=True)
+    st.markdown("<div class='dashboard-subtitle'>Household-level wealth tracker for investment holdings, BUY/SELL FIFO, actual dividends, cash/sweep balances, and multi-account views.</div>", unsafe_allow_html=True)
+
+
+def render_source_footer(last_refresh: str) -> None:
+    """Render data-source metadata at the bottom to keep the main dashboard readable."""
+    st.markdown("---")
+    st.markdown("### Data Sources & Runtime Info")
     st.markdown(f"""
         <div class="meta-box">
             <b>Portfolio Source:</b> {st.session_state.get('portfolio_source', 'unknown')} &nbsp; | &nbsp;
@@ -2868,6 +2954,26 @@ def render_overview(holdings: pd.DataFrame, realized_df: pd.DataFrame, dividends
         render_kpi_card("Cash Weight", fmt_pct(summary.get("cash_weight_pct"), signed=False), "Cash / total account value", "blue")
     with e4:
         render_kpi_card("Est. Annual Cash Interest", fmt_currency_with_pct(summary.get("estimated_annual_cash_interest", 0.0), summary.get("estimated_cash_yield"), signed=False), "Cash balance × annual yield", "blue")
+
+    tax_perf = tax_bucket_performance_table(holdings, cash_table)
+    if not tax_perf.empty:
+        st.markdown("### Tax Bucket Performance")
+        st.caption("Investment return by Tax Bucket. Cash/sweep balances and SPAXX interest are shown for account context, but return percentages are calculated from ETF/stock cost basis.")
+        card_cols = st.columns(min(4, max(1, len(tax_perf))))
+        for idx, (_, row) in enumerate(tax_perf.iterrows()):
+            with card_cols[idx % len(card_cols)]:
+                tone = "positive" if safe_float(row.get("Total Return incl. Dividends"), 0.0) >= 0 else "negative"
+                render_kpi_card(
+                    f"{row.get('tax_bucket', 'Unclassified')} Return",
+                    fmt_currency_with_pct(row.get("Total Return incl. Dividends"), row.get("Return incl. Dividends %")),
+                    f"Unrealized {fmt_currency(row.get('Unrealized P/L'))} · Cash {fmt_currency(row.get('Current Cash'))}",
+                    tone,
+                )
+        chart_col, table_col = st.columns([1, 1.35])
+        with chart_col:
+            st.plotly_chart(make_bar_chart(tax_perf, "tax_bucket", "Total Return incl. Dividends", "Total Return by Tax Bucket", color="tax_bucket"), use_container_width=True, key="overview_tax_bucket_return")
+        with table_col:
+            style_money_table(tax_perf, height=300)
 
     exp = exposure_by_ticker(holdings)
     allocation_holdings = add_cash_to_allocation_holdings(holdings, cash_table)
@@ -3409,6 +3515,8 @@ def main() -> None:
         render_price_tab(filtered_tx, holdings, online_data, controls["benchmark"])
     with tabs[6]:
         render_data_manager(accounts_clean, tx_clean, div_clean, cash_clean, data_quality)
+
+    render_source_footer(st.session_state.last_online_refresh)
 
 
 if __name__ == "__main__":
