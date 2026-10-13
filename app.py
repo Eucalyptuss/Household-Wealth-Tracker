@@ -1330,31 +1330,31 @@ def tax_bucket_performance_table(holdings: pd.DataFrame, cash_table: pd.DataFram
 
 
 def tax_bucket_account_performance_table(holdings: pd.DataFrame, cash_table: pd.DataFrame) -> pd.DataFrame:
-    """Return Tax Bucket -> Account ID performance rows for the Overview tab.
+    """Return Tax Bucket performance broken down by Account ID.
 
-    This keeps the high-level Tax Bucket summary but makes each bucket actionable by
-    showing the accounts inside it. Investment return percentages still use only
-    ETF/stock cost basis; cash/sweep balances are shown separately for account
-    context.
+    This is the account-level companion to tax_bucket_performance_table(). It
+    intentionally keeps all rows inside the same Tax Bucket Performance section
+    instead of creating a separate Overview section.
     """
-    id_cols = ["tax_bucket", "Account ID"]
-    meta_defaults = {"owner": "Unmapped", "account_name": ""}
+    key_cols = ["tax_bucket", "Account ID"]
+    invest_numeric_cols = [
+        "Cost Basis", "Market Value", "Unrealized P/L", "Realized P/L",
+        "Actual Dividends", "Total Return incl. Dividends", "Estimated Annual Dividend",
+    ]
 
     if holdings is not None and not holdings.empty and "Account ID" in holdings.columns:
         h = holdings.copy()
         if "tax_bucket" not in h.columns:
             h["tax_bucket"] = "Unclassified"
-        for col, default in meta_defaults.items():
-            if col not in h.columns:
-                h[col] = default
-        for col in [
-            "Cost Basis", "Market Value", "Unrealized P/L", "Realized P/L",
-            "Actual Dividends", "Total Return incl. Dividends", "Estimated Annual Dividend",
-        ]:
+        if "owner" not in h.columns:
+            h["owner"] = "Unmapped"
+        if "account_name" not in h.columns:
+            h["account_name"] = h["Account ID"]
+        for col in invest_numeric_cols:
             if col not in h.columns:
                 h[col] = 0.0
             h[col] = pd.to_numeric(h[col], errors="coerce").fillna(0.0)
-        investment = h.groupby(id_cols, as_index=False).agg({
+        invest = h.groupby(key_cols, as_index=False).agg({
             "owner": "first",
             "account_name": "first",
             "Cost Basis": "sum",
@@ -1366,93 +1366,82 @@ def tax_bucket_account_performance_table(holdings: pd.DataFrame, cash_table: pd.
             "Estimated Annual Dividend": "sum",
         })
     else:
-        investment = pd.DataFrame(columns=id_cols + [
-            "owner", "account_name", "Cost Basis", "Market Value", "Unrealized P/L",
-            "Realized P/L", "Actual Dividends", "Total Return incl. Dividends",
-            "Estimated Annual Dividend",
-        ])
+        invest = pd.DataFrame(columns=key_cols + ["owner", "account_name"] + invest_numeric_cols)
 
+    cash_numeric_cols = ["Current Cash", "Cash Interest YTD", "Estimated Annual Cash Interest"]
     if cash_table is not None and not cash_table.empty and "Account ID" in cash_table.columns:
-        cash = cash_table.copy()
-        if "tax_bucket" not in cash.columns:
-            cash["tax_bucket"] = "Unclassified"
-        for col, default in meta_defaults.items():
-            if col not in cash.columns:
-                cash[col] = default
-        for col in ["Current Cash", "Cash Interest YTD", "Estimated Annual Cash Interest", "Total Account Value"]:
-            if col not in cash.columns:
-                cash[col] = 0.0
-            cash[col] = pd.to_numeric(cash[col], errors="coerce").fillna(0.0)
-        cash_group = cash.groupby(id_cols, as_index=False).agg({
+        c = cash_table.copy()
+        if "tax_bucket" not in c.columns:
+            c["tax_bucket"] = "Unclassified"
+        if "owner" not in c.columns:
+            c["owner"] = "Unmapped"
+        if "account_name" not in c.columns:
+            c["account_name"] = c["Account ID"]
+        for col in cash_numeric_cols:
+            if col not in c.columns:
+                c[col] = 0.0
+            c[col] = pd.to_numeric(c[col], errors="coerce").fillna(0.0)
+        cash = c.groupby(key_cols, as_index=False).agg({
             "owner": "first",
             "account_name": "first",
             "Current Cash": "sum",
             "Cash Interest YTD": "sum",
             "Estimated Annual Cash Interest": "sum",
-            "Total Account Value": "sum",
-        })
+        }).rename(columns={"owner": "owner_cash", "account_name": "account_name_cash"})
     else:
-        cash_group = pd.DataFrame(columns=id_cols + [
-            "owner", "account_name", "Current Cash", "Cash Interest YTD",
-            "Estimated Annual Cash Interest", "Total Account Value",
-        ])
+        cash = pd.DataFrame(columns=key_cols + ["owner_cash", "account_name_cash"] + cash_numeric_cols)
 
-    keys = pd.concat([
-        investment[id_cols] if not investment.empty else pd.DataFrame(columns=id_cols),
-        cash_group[id_cols] if not cash_group.empty else pd.DataFrame(columns=id_cols),
-    ], ignore_index=True).drop_duplicates()
-    if keys.empty:
+    base = invest.merge(cash, on=key_cols, how="outer")
+    if base.empty:
         return pd.DataFrame()
 
-    out = keys.merge(investment, on=id_cols, how="left", suffixes=("", "_investment"))
-    out = out.merge(cash_group, on=id_cols, how="left", suffixes=("", "_cash"))
+    for col in invest_numeric_cols + cash_numeric_cols:
+        if col not in base.columns:
+            base[col] = 0.0
+        base[col] = pd.to_numeric(base[col], errors="coerce").fillna(0.0)
 
-    for col in ["owner", "account_name"]:
-        cash_col = f"{col}_cash"
-        inv_col = f"{col}_investment"
-        if col not in out.columns:
-            out[col] = np.nan
-        if cash_col in out.columns:
-            out[col] = out[col].where(~out[col].map(_is_blank_like), out[cash_col])
-        if inv_col in out.columns:
-            out[col] = out[col].where(~out[col].map(_is_blank_like), out[inv_col])
-        out[col] = out[col].fillna(meta_defaults.get(col, ""))
+    if "owner" not in base.columns:
+        base["owner"] = np.nan
+    if "account_name" not in base.columns:
+        base["account_name"] = np.nan
+    base["owner"] = base["owner"].combine_first(base.get("owner_cash", pd.Series(index=base.index, dtype=object))).fillna("Unmapped")
+    base["account_name"] = base["account_name"].combine_first(base.get("account_name_cash", pd.Series(index=base.index, dtype=object))).fillna(base["Account ID"])
+    base = base.drop(columns=["owner_cash", "account_name_cash"], errors="ignore")
 
-    for col in [
-        "Cost Basis", "Market Value", "Unrealized P/L", "Realized P/L",
-        "Actual Dividends", "Total Return incl. Dividends", "Estimated Annual Dividend",
-        "Current Cash", "Cash Interest YTD", "Estimated Annual Cash Interest", "Total Account Value",
-    ]:
-        if col not in out.columns:
-            out[col] = 0.0
-        out[col] = pd.to_numeric(out[col], errors="coerce").fillna(0.0)
-
-    out["Invested + Cash Value"] = out["Market Value"] + out["Current Cash"]
-    out["Unrealized Return %"] = np.where(out["Cost Basis"] > 0, out["Unrealized P/L"] / out["Cost Basis"], np.nan)
-    out["Return incl. Dividends %"] = np.where(out["Cost Basis"] > 0, out["Total Return incl. Dividends"] / out["Cost Basis"], np.nan)
-    out["Display Account"] = out["Account ID"].map(lambda v: compact_account_id(v, max_len=16))
-    out["Account Label"] = out.apply(
-        lambda r: f"{r['Display Account']} · {r['account_name']}" if not _is_blank_like(r.get("account_name")) and str(r.get("account_name")) != str(r.get("Account ID")) else str(r["Display Account"]),
+    base["Unrealized Return %"] = np.where(base["Cost Basis"] > 0, base["Unrealized P/L"] / base["Cost Basis"], np.nan)
+    base["Return incl. Dividends %"] = np.where(base["Cost Basis"] > 0, base["Total Return incl. Dividends"] / base["Cost Basis"], np.nan)
+    base["Invested + Cash Value"] = base["Market Value"] + base["Current Cash"]
+    base["Short Account ID"] = base["Account ID"].map(compact_account_id)
+    base["Account Display"] = base.apply(
+        lambda r: f"{r['Short Account ID']} · {r['account_name']}" if str(r.get("account_name", "")).strip() and str(r.get("account_name")) != str(r.get("Account ID")) else str(r["Short Account ID"]),
         axis=1,
     )
 
-    # Hide completely empty inactive-looking rows, but keep accounts with either cash or invested value.
-    out = out[(out["Invested + Cash Value"].abs() > 1e-9) | (out["Cost Basis"].abs() > 1e-9) | (out["Total Return incl. Dividends"].abs() > 1e-9)].copy()
-    if out.empty:
-        return out
-
-    bucket_order = {"Taxable": 0, "Retirement": 1, "Unclassified": 98}
-    out["_bucket_sort"] = out["tax_bucket"].map(lambda v: bucket_order.get(str(v), 50))
-    out = out.sort_values(["_bucket_sort", "tax_bucket", "Invested + Cash Value"], ascending=[True, True, False]).drop(columns=["_bucket_sort"])
-
     ordered_cols = [
-        "tax_bucket", "Account ID", "Display Account", "account_name", "owner",
+        "tax_bucket", "Short Account ID", "Account ID", "account_name", "owner",
         "Cost Basis", "Market Value", "Current Cash", "Invested + Cash Value",
         "Unrealized P/L", "Unrealized Return %", "Realized P/L", "Actual Dividends",
         "Total Return incl. Dividends", "Return incl. Dividends %",
         "Cash Interest YTD", "Estimated Annual Cash Interest", "Estimated Annual Dividend",
     ]
-    return out[[c for c in ordered_cols if c in out.columns] + [c for c in out.columns if c not in ordered_cols and not c.endswith("_cash") and not c.endswith("_investment")]]
+    return (
+        base[[c for c in ordered_cols if c in base.columns]]
+        .sort_values(["tax_bucket", "Invested + Cash Value", "Market Value"], ascending=[True, False, False])
+        .reset_index(drop=True)
+    )
+
+
+def tax_bucket_account_bucket_order(bucket_summary: pd.DataFrame, account_perf: pd.DataFrame) -> List[str]:
+    """Order Tax Buckets by total invested+cash value, preserving account-only buckets."""
+    ordered: List[str] = []
+    if bucket_summary is not None and not bucket_summary.empty and "tax_bucket" in bucket_summary.columns:
+        sort_col = "Invested + Cash Value" if "Invested + Cash Value" in bucket_summary.columns else "Market Value"
+        ordered.extend(bucket_summary.sort_values(sort_col, ascending=False)["tax_bucket"].astype(str).tolist())
+    if account_perf is not None and not account_perf.empty and "tax_bucket" in account_perf.columns:
+        for bucket in account_perf["tax_bucket"].dropna().astype(str).unique().tolist():
+            if bucket not in ordered:
+                ordered.append(bucket)
+    return ordered
 
 
 def exposure_by_ticker(holdings: pd.DataFrame) -> pd.DataFrame:
@@ -2323,66 +2312,6 @@ def render_account_allocation_donut_grid(
                 st.plotly_chart(fig, use_container_width=True, key=f"{key_prefix}_{i}")
 
 
-def make_tax_bucket_account_bar_chart(df: pd.DataFrame, metric: str, title: str) -> go.Figure:
-    """Horizontal account-level bar chart for one Tax Bucket."""
-    if df is None or df.empty or metric not in df.columns:
-        return labeled_empty_figure(title, "Account ID", chart_label(metric))
-    data = df.copy()
-    data[metric] = pd.to_numeric(data[metric], errors="coerce")
-    data = data.dropna(subset=[metric])
-    if data.empty:
-        return labeled_empty_figure(title, "Account ID", chart_label(metric))
-
-    if "Display Account" not in data.columns:
-        data["Display Account"] = data["Account ID"].map(lambda v: compact_account_id(v, max_len=16))
-    data["Chart Account"] = _make_unique_display_labels(data["Display Account"].astype(str).tolist())
-    data = data.sort_values(metric, ascending=True)
-    is_pct = "%" in metric or "Yield" in metric
-    value_label = chart_label(metric)
-    chart_height = int(min(520, max(280, 130 + len(data) * 52)))
-
-    fig = px.bar(
-        data,
-        x=metric,
-        y="Chart Account",
-        color="Display Account" if "Display Account" in data.columns else None,
-        orientation="h",
-        text=metric,
-        title=title,
-        custom_data=[c for c in ["Account ID", "account_name", "Market Value", "Current Cash", "Cost Basis"] if c in data.columns],
-        labels={
-            metric: value_label,
-            "Chart Account": "Account ID",
-            "Display Account": "Account ID",
-            "Market Value": "Market Value ($)",
-            "Current Cash": "Current Cash ($)",
-            "Cost Basis": "Cost Basis ($)",
-        },
-    )
-    if is_pct:
-        texttemplate = "%{text:.1%}"
-        xaxis_tickformat = ".1%"
-    else:
-        texttemplate = "$%{text:,.2f}"
-        xaxis_tickformat = None
-    fig.update_traces(texttemplate=texttemplate, textposition="outside", cliponaxis=False)
-    if xaxis_tickformat:
-        fig.update_xaxes(tickformat=xaxis_tickformat)
-    hover_lines = [
-        "Account ID: %{customdata[0]}",
-        "Account Name: %{customdata[1]}",
-    ]
-    if is_pct:
-        hover_lines.append(f"{value_label}: %{{x:.2%}}")
-    else:
-        hover_lines.append(f"{value_label}: $%{{x:,.2f}}")
-    if len(fig.data) > 0:
-        fig.update_traces(hovertemplate="<br>".join(hover_lines) + "<extra></extra>")
-    fig.update_yaxes(categoryorder="array", categoryarray=data["Chart Account"].tolist())
-    fig = apply_bar_label_safety(fig, data[metric], orientation="h", zero_floor=False)
-    return apply_chart_theme(fig, height=chart_height, xaxis_title=value_label, yaxis_title="Account ID", legend_title="Account ID", top=78, bottom=62, left=110, right=96)
-
-
 def make_bar_chart(df: pd.DataFrame, x: str, y: str, title: str, color: Optional[str] = None) -> go.Figure:
     if df is None or df.empty or x not in df.columns or y not in df.columns:
         return labeled_empty_figure(title, chart_label(x), chart_label(y))
@@ -2408,6 +2337,124 @@ def make_bar_chart(df: pd.DataFrame, x: str, y: str, title: str, color: Optional
     fig = apply_bar_label_safety(fig, data[y], orientation="v", zero_floor=True)
     legend_title = chart_label(color) if color and color in data.columns else ""
     return apply_chart_theme(fig, height=430, xaxis_title=chart_label(x), yaxis_title=chart_label(y), legend_title=legend_title, top=84, bottom=88, left=92, right=60)
+
+
+def make_tax_bucket_account_performance_chart(df: pd.DataFrame, bucket: str) -> go.Figure:
+    """Two-panel account comparison chart for one Tax Bucket.
+
+    Left panel shows total return dollars. Right panel shows return percentage.
+    Both use the same account labels so the user can compare account-level results
+    within Retirement, Taxable, or any other bucket without leaving the Tax Bucket
+    Performance section.
+    """
+    title = f"{bucket} Account Performance"
+    if df is None or df.empty:
+        return labeled_empty_figure(title, "Return", "Account ID")
+
+    data = df.copy()
+    if "Short Account ID" not in data.columns and "Account ID" in data.columns:
+        data["Short Account ID"] = data["Account ID"].map(compact_account_id)
+    label_col = "Short Account ID" if "Short Account ID" in data.columns else "Account ID"
+    for col in ["Total Return incl. Dividends", "Return incl. Dividends %", "Invested + Cash Value", "Current Cash", "Market Value"]:
+        if col not in data.columns:
+            data[col] = np.nan
+        data[col] = pd.to_numeric(data[col], errors="coerce")
+    data = data.sort_values("Invested + Cash Value", ascending=True).reset_index(drop=True)
+    y_labels = data[label_col].astype(str).tolist()
+
+    height = int(min(720, max(340, 190 + 46 * len(data))))
+    fig = make_subplots(
+        rows=1,
+        cols=2,
+        subplot_titles=("Total return ($)", "Return (%)"),
+        horizontal_spacing=0.16,
+        specs=[[{"type": "xy"}, {"type": "xy"}]],
+    )
+    fig.add_trace(
+        go.Bar(
+            x=data["Total Return incl. Dividends"],
+            y=y_labels,
+            orientation="h",
+            name="Total Return",
+            text=data["Total Return incl. Dividends"],
+            texttemplate="$%{text:,.2f}",
+            textposition="outside",
+            customdata=np.stack([
+                data["Account ID"].astype(str) if "Account ID" in data.columns else pd.Series(y_labels),
+                data["Market Value"].fillna(0.0),
+                data["Current Cash"].fillna(0.0),
+                data["Invested + Cash Value"].fillna(0.0),
+                data["Return incl. Dividends %"],
+            ], axis=-1),
+            hovertemplate=(
+                "Account ID: %{customdata[0]}<br>"
+                "Total return: $%{x:,.2f}<br>"
+                "Return: %{customdata[4]:.2%}<br>"
+                "Market value: $%{customdata[1]:,.2f}<br>"
+                "Cash: $%{customdata[2]:,.2f}<br>"
+                "Invested + Cash: $%{customdata[3]:,.2f}<extra></extra>"
+            ),
+        ),
+        row=1,
+        col=1,
+    )
+    fig.add_trace(
+        go.Bar(
+            x=data["Return incl. Dividends %"],
+            y=y_labels,
+            orientation="h",
+            name="Return %",
+            text=data["Return incl. Dividends %"],
+            texttemplate="%{text:.1%}",
+            textposition="outside",
+            customdata=np.stack([
+                data["Account ID"].astype(str) if "Account ID" in data.columns else pd.Series(y_labels),
+                data["Total Return incl. Dividends"].fillna(0.0),
+                data["Market Value"].fillna(0.0),
+                data["Current Cash"].fillna(0.0),
+            ], axis=-1),
+            hovertemplate=(
+                "Account ID: %{customdata[0]}<br>"
+                "Return: %{x:.2%}<br>"
+                "Total return: $%{customdata[1]:,.2f}<br>"
+                "Market value: $%{customdata[2]:,.2f}<br>"
+                "Cash: $%{customdata[3]:,.2f}<extra></extra>"
+            ),
+        ),
+        row=1,
+        col=2,
+    )
+    fig.update_xaxes(title_text="Total Return incl. Dividends ($)", row=1, col=1, zeroline=True)
+    fig.update_xaxes(title_text="Return incl. Dividends (%)", row=1, col=2, tickformat=".1%", zeroline=True)
+    fig.update_yaxes(title_text="Account ID", row=1, col=1, categoryorder="array", categoryarray=y_labels)
+    fig.update_yaxes(title_text="", row=1, col=2, categoryorder="array", categoryarray=y_labels, showticklabels=False)
+    fig.update_layout(title=title, showlegend=False, uniformtext_minsize=9, uniformtext_mode="show")
+    fig.update_traces(cliponaxis=False, constraintext="none")
+
+    def padded_range(values: Iterable[Any]) -> Optional[List[float]]:
+        numeric = pd.to_numeric(pd.Series(list(values)), errors="coerce").dropna()
+        if numeric.empty:
+            return None
+        vmin = float(numeric.min())
+        vmax = float(numeric.max())
+        if math.isclose(vmin, vmax):
+            pad = max(abs(vmax) * 0.18, 1.0 if abs(vmax) > 1 else 0.01)
+        else:
+            pad = max((vmax - vmin) * 0.18, abs(vmax) * 0.06, abs(vmin) * 0.06, 1e-9)
+        return [vmin - pad, vmax + pad]
+
+    total_range = padded_range(data["Total Return incl. Dividends"])
+    pct_range = padded_range(data["Return incl. Dividends %"])
+    if total_range:
+        fig.update_xaxes(range=total_range, row=1, col=1)
+    if pct_range:
+        fig.update_xaxes(range=pct_range, row=1, col=2)
+    fig = apply_chart_theme(fig, height=height, top=84, bottom=72, left=118, right=72)
+    fig.update_xaxes(title_text="Total Return incl. Dividends ($)", row=1, col=1, zeroline=True)
+    fig.update_xaxes(title_text="Return incl. Dividends (%)", row=1, col=2, tickformat=".1%", zeroline=True)
+    fig.update_yaxes(title_text="Account ID", row=1, col=1, categoryorder="array", categoryarray=y_labels)
+    fig.update_yaxes(title_text="", row=1, col=2, categoryorder="array", categoryarray=y_labels, showticklabels=False)
+    return fig
 
 
 def top_movers_data(holdings: pd.DataFrame) -> pd.DataFrame:
@@ -3143,71 +3190,69 @@ def render_overview(holdings: pd.DataFrame, realized_df: pd.DataFrame, dividends
 
     tax_perf = tax_bucket_performance_table(holdings, cash_table)
     tax_account_perf = tax_bucket_account_performance_table(holdings, cash_table)
-    if not tax_perf.empty:
+    if not tax_perf.empty or not tax_account_perf.empty:
         st.markdown("### Tax Bucket Performance")
-        st.caption("Investment return by Tax Bucket and by Account ID. Cash/sweep balances and SPAXX interest are shown for account context; return percentages are calculated from ETF/stock cost basis.")
-        card_cols = st.columns(min(4, max(1, len(tax_perf))))
-        for idx, (_, row) in enumerate(tax_perf.iterrows()):
-            with card_cols[idx % len(card_cols)]:
-                tone = "positive" if safe_float(row.get("Total Return incl. Dividends"), 0.0) >= 0 else "negative"
-                render_kpi_card(
-                    f"{row.get('tax_bucket', 'Unclassified')} Total",
-                    fmt_currency_with_pct(row.get("Total Return incl. Dividends"), row.get("Return incl. Dividends %")),
-                    f"Cash {fmt_currency(row.get('Current Cash'))} · Value {fmt_currency(row.get('Invested + Cash Value'))}",
-                    tone,
-                )
+        st.caption(
+            "Tax Bucket totals and Account ID-level breakdowns are shown in one section. "
+            "Cash/sweep balances and SPAXX interest are included for account context; return percentages remain based on ETF/stock cost basis."
+        )
 
-        chart_col, table_col = st.columns([1, 1.25])
-        with chart_col:
-            st.plotly_chart(make_bar_chart(tax_perf, "tax_bucket", "Total Return incl. Dividends", "Total Return by Tax Bucket", color="tax_bucket"), use_container_width=True, key="overview_tax_bucket_return")
-        with table_col:
-            summary_cols = [
-                "tax_bucket", "Cost Basis", "Market Value", "Current Cash", "Invested + Cash Value",
-                "Total Return incl. Dividends", "Return incl. Dividends %",
-                "Cash Interest YTD", "Estimated Annual Cash Interest",
-            ]
-            style_money_table(tax_perf[[c for c in summary_cols if c in tax_perf.columns]], height=300)
+        if not tax_perf.empty:
+            card_cols = st.columns(min(4, max(1, len(tax_perf))))
+            for idx, (_, row) in enumerate(tax_perf.iterrows()):
+                with card_cols[idx % len(card_cols)]:
+                    tone = "positive" if safe_float(row.get("Total Return incl. Dividends"), 0.0) >= 0 else "negative"
+                    render_kpi_card(
+                        f"{row.get('tax_bucket', 'Unclassified')} Total",
+                        fmt_currency_with_pct(row.get("Total Return incl. Dividends"), row.get("Return incl. Dividends %")),
+                        f"Cash {fmt_currency(row.get('Current Cash'))} · Value {fmt_currency(row.get('Invested + Cash Value'))}",
+                        tone,
+                    )
 
-        if not tax_account_perf.empty:
-            st.markdown("#### Account Breakdown inside each Tax Bucket")
-            bucket_order = tax_account_perf["tax_bucket"].dropna().astype(str).drop_duplicates().tolist()
-            for bucket in bucket_order:
-                bucket_df = tax_account_perf[tax_account_perf["tax_bucket"].astype(str) == str(bucket)].copy()
-                if bucket_df.empty:
-                    continue
-                st.markdown(f"##### {html.escape(str(bucket))}")
-                account_cols = st.columns(min(4, max(1, len(bucket_df))))
-                for idx, (_, row) in enumerate(bucket_df.iterrows()):
-                    with account_cols[idx % len(account_cols)]:
-                        tone = "positive" if safe_float(row.get("Total Return incl. Dividends"), 0.0) >= 0 else "negative"
-                        label = row.get("Display Account", row.get("Account ID", "Account"))
-                        render_kpi_card(
-                            f"{label}",
-                            fmt_currency_with_pct(row.get("Total Return incl. Dividends"), row.get("Return incl. Dividends %")),
-                            f"MV {fmt_currency(row.get('Market Value'))} · Cash {fmt_currency(row.get('Current Cash'))}",
-                            tone,
-                        )
-                account_chart_col, pct_chart_col = st.columns(2)
-                with account_chart_col:
-                    st.plotly_chart(
-                        make_tax_bucket_account_bar_chart(bucket_df, "Total Return incl. Dividends", f"{bucket}: Total Return by Account ID"),
-                        use_container_width=True,
-                        key=f"overview_tax_bucket_account_return_{bucket}",
-                    )
-                with pct_chart_col:
-                    st.plotly_chart(
-                        make_tax_bucket_account_bar_chart(bucket_df, "Return incl. Dividends %", f"{bucket}: Return % by Account ID"),
-                        use_container_width=True,
-                        key=f"overview_tax_bucket_account_return_pct_{bucket}",
-                    )
-                detail_cols = [
-                    "tax_bucket", "Account ID", "Display Account", "account_name",
-                    "Cost Basis", "Market Value", "Current Cash", "Invested + Cash Value",
-                    "Unrealized P/L", "Unrealized Return %", "Realized P/L", "Actual Dividends",
-                    "Total Return incl. Dividends", "Return incl. Dividends %",
-                    "Cash Interest YTD", "Estimated Annual Cash Interest", "Estimated Annual Dividend",
-                ]
-                style_money_table(bucket_df[[c for c in detail_cols if c in bucket_df.columns]], height=260)
+        bucket_order = tax_bucket_account_bucket_order(tax_perf, tax_account_perf)
+        if bucket_order:
+            tabs = st.tabs(bucket_order)
+            for tab, bucket in zip(tabs, bucket_order):
+                with tab:
+                    bucket_total = tax_perf[tax_perf["tax_bucket"].astype(str) == str(bucket)].copy() if not tax_perf.empty else pd.DataFrame()
+                    bucket_accounts = tax_account_perf[tax_account_perf["tax_bucket"].astype(str) == str(bucket)].copy() if not tax_account_perf.empty else pd.DataFrame()
+
+                    if not bucket_total.empty:
+                        total_row = bucket_total.iloc[0]
+                        b1, b2, b3, b4 = st.columns(4)
+                        with b1:
+                            render_kpi_card(
+                                f"{bucket} Return",
+                                fmt_currency_with_pct(total_row.get("Total Return incl. Dividends"), total_row.get("Return incl. Dividends %")),
+                                "Total return incl. dividends",
+                                "positive" if safe_float(total_row.get("Total Return incl. Dividends"), 0.0) >= 0 else "negative",
+                            )
+                        with b2:
+                            render_kpi_card("Invested Value", fmt_currency(total_row.get("Market Value")), "ETF/stock market value")
+                        with b3:
+                            render_kpi_card("Current Cash", fmt_currency(total_row.get("Current Cash")), "Cash/sweep balance", "blue")
+                        with b4:
+                            render_kpi_card("Invested + Cash", fmt_currency(total_row.get("Invested + Cash Value")), "Total account context")
+
+                    if bucket_accounts.empty:
+                        st.info(f"No account-level data available for {bucket}.")
+                    else:
+                        chart_col, table_col = st.columns([1.05, 1.45])
+                        with chart_col:
+                            st.plotly_chart(
+                                make_tax_bucket_account_performance_chart(bucket_accounts, str(bucket)),
+                                use_container_width=True,
+                                key=f"overview_tax_bucket_account_chart_{str(bucket).lower().replace(' ', '_')}",
+                            )
+                        with table_col:
+                            display_cols = [
+                                "Short Account ID", "Account ID", "account_name", "owner",
+                                "Cost Basis", "Market Value", "Current Cash", "Invested + Cash Value",
+                                "Unrealized P/L", "Unrealized Return %", "Realized P/L",
+                                "Actual Dividends", "Total Return incl. Dividends", "Return incl. Dividends %",
+                                "Cash Interest YTD", "Estimated Annual Cash Interest", "Estimated Annual Dividend",
+                            ]
+                            style_money_table(bucket_accounts[[c for c in display_cols if c in bucket_accounts.columns]], height=390)
 
     exp = exposure_by_ticker(holdings)
     allocation_holdings = add_cash_to_allocation_holdings(holdings, cash_table)
