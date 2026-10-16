@@ -28,7 +28,7 @@ from zoneinfo import ZoneInfo
 
 APP_TITLE = "Household Wealth Tracker"
 CREATOR_NAME = "Eucalyptuss"
-APP_VERSION = "1.0.28"
+APP_VERSION = "1.0.29"
 BASE_DIR = Path(__file__).resolve().parent
 ET = ZoneInfo("America/New_York")
 TODAY = datetime.now(ET).date()
@@ -1743,7 +1743,8 @@ def add_cash_to_allocation_holdings(holdings: pd.DataFrame, cash_table: pd.DataF
             "account_name": row.get("account_name", row.get("Account ID")),
             "tax_bucket": row.get("tax_bucket", "Unclassified"),
             "Ticker": f"Cash / {label}",
-            "Shares": 0.0,
+            "Allocation Asset Type": "Cash",
+            "Shares": np.nan,
             "Avg Buy Price": np.nan,
             "Current Price": 1.0,
             "Cost Basis": cash_balance,
@@ -2083,85 +2084,148 @@ def compact_account_axis_label(ticker: Any, account_id: Any, max_len: int = 22) 
     return label if len(label) <= max_len else f"{_short_label(ticker_text, 8)} · {_short_label(short_account, max_len - min(len(ticker_text), 8) - 3)}"
 
 
-def _pie_texttemplate(field: str, show_account_count: bool = False) -> str:
-    if field == "Ticker":
-        account_count_line = "<br>%{customdata[1]:,.0f} acct" if show_account_count else ""
-        return f"<b>%{{label}}</b><br>%{{percent}}<br>%{{customdata[0]:,.2f}} sh{account_count_line}"
-    return "<b>%{label}</b><br>%{percent}"
+def _is_cash_allocation_row(row: pd.Series) -> bool:
+    """Cash from cash_events.csv has a USD balance, not tracked security shares."""
+    asset_type = str(row.get("Allocation Asset Type", "")).strip().lower()
+    ticker = str(row.get("Ticker", "")).strip().lower()
+    return asset_type == "cash" or ticker.startswith("cash /")
 
 
-def _pie_hovertemplate(field: str, account_label: Optional[str] = None, include_account_count: bool = True) -> str:
-    account_part = "" if account_label is None else f"Account ID: {html.escape(str(account_label))}<br>"
+def _fmt_donut_shares(value: Any) -> Optional[str]:
+    """Format known security quantities only; never serialize NaN as shares."""
+    try:
+        qty = float(value)
+    except (TypeError, ValueError):
+        return None
+    if not np.isfinite(qty) or qty < 0:
+        return None
+    if abs(qty - round(qty)) < 1e-8:
+        return f"{round(qty):,} SH"
+    return f"{qty:,.6f}".rstrip("0").rstrip(".") + " SH"
+
+
+def _donut_active_rows(holdings: pd.DataFrame, field: str) -> pd.DataFrame:
+    """Exclude zero/invalid values so Plotly never sees non-finite pie weights."""
+    if holdings is None or holdings.empty or field not in holdings.columns or "Market Value" not in holdings.columns:
+        return pd.DataFrame()
+    active = holdings.copy()
+    if "Holding Status" in active.columns:
+        active = active[active["Holding Status"] == "Active"].copy()
+    active["Market Value"] = pd.to_numeric(active["Market Value"], errors="coerce")
+    active["Market Value"] = active["Market Value"].replace([np.inf, -np.inf], np.nan)
+    active = active[active["Market Value"].notna() & (active["Market Value"] > 0)].copy()
+    if active.empty:
+        return active
+    active[field] = active[field].fillna("Unknown").astype(str)
+    if "Shares" not in active.columns:
+        active["Shares"] = np.nan
+    else:
+        active["Shares"] = pd.to_numeric(active["Shares"], errors="coerce").replace([np.inf, -np.inf], np.nan)
+    if "Ticker" in active.columns:
+        active["Is Cash Allocation"] = active.apply(_is_cash_allocation_row, axis=1)
+    else:
+        active["Is Cash Allocation"] = False
+    return active
+
+
+def _donut_grouped_rows(active: pd.DataFrame, field: str, *, include_account_count: bool = False) -> pd.DataFrame:
+    """Aggregate allocation weights without turning unknown share quantities into 0."""
+    if active is None or active.empty:
+        return pd.DataFrame()
+    data = (
+        active.groupby(field, as_index=False)
+        .agg({"Market Value": "sum"})
+        .sort_values("Market Value", ascending=False)
+        .reset_index(drop=True)
+    )
     if field == "Ticker":
-        account_count_part = "Holding Account IDs: %{customdata[1]:,.0f}<br>" if include_account_count else ""
-        return (
-            account_part
-            + f"{chart_label(field)}: %{{label}}<br>"
-            + "Shares: %{customdata[0]:,.4f}<br>"
-            + account_count_part
-            + "Market Value: $%{value:,.2f}<br>"
-            + "Weight: %{percent}<extra></extra>"
-        )
-    return (
-        account_part
-        + f"{chart_label(field)}: %{{label}}<br>"
-        + "Market Value: $%{value:,.2f}<br>"
-        + "Weight: %{percent}<extra></extra>"
+        shares = active.groupby(field)["Shares"].sum(min_count=1)
+        all_shares_known = active.groupby(field)["Shares"].apply(lambda q: bool(q.notna().all()))
+        data["Shares"] = data[field].map(shares).astype(float)
+        data.loc[~data[field].map(all_shares_known).fillna(False), "Shares"] = np.nan
+        cash_types = active.groupby(field)["Is Cash Allocation"].all()
+        data["Is Cash Allocation"] = data[field].map(cash_types).fillna(False).astype(bool)
+        if include_account_count and "Account ID" in active.columns:
+            accounts = active.groupby(field)["Account ID"].nunique()
+            data["Account Count"] = data[field].map(accounts).fillna(0).astype(int)
+    return data
+
+
+def _build_allocation_pie(
+    grouped: pd.DataFrame,
+    field: str,
+    *,
+    account_id: Optional[str] = None,
+    show_account_count: bool = False,
+    showlegend: bool = True,
+) -> go.Pie:
+    """Use per-slice label/hover text instead of a uniform SH placeholder.
+
+    Stock/ETF -> exact known SH quantity.
+    Cash / SPAXX -> USD balance (no fictitious units or 0 SH).
+    Unknown quantity -> no SH line rather than NaN/0 SH.
+    """
+    inner_text: List[str] = []
+    hovers: List[str] = []
+    for _, row in grouped.iterrows():
+        label = html.escape(str(row[field]))
+        amount = float(row["Market Value"])
+        parts = []
+        if account_id is not None:
+            parts.append(f"Account ID: {html.escape(str(account_id))}")
+        parts.append(f"{html.escape(chart_label(field))}: {label}")
+        if field == "Ticker":
+            is_cash = bool(row.get("Is Cash Allocation", False))
+            if is_cash:
+                qty_label = fmt_currency(amount)
+                parts.append(f"Cash balance: {qty_label}")
+            else:
+                qty_label = _fmt_donut_shares(row.get("Shares", np.nan))
+                parts.append(f"Shares: {qty_label if qty_label is not None else 'Not available'}")
+            inner_text.append(f"<b>{label}</b><br>{html.escape(qty_label)}" if qty_label else f"<b>{label}</b>")
+            if show_account_count and "Account Count" in grouped.columns:
+                account_count = int(row.get("Account Count", 0))
+                parts.append(f"Holding Account IDs: {account_count}")
+                inner_text[-1] += f"<br>{account_count} acct"
+        else:
+            inner_text.append(f"<b>{label}</b>")
+        parts.append(f"Market Value: {fmt_currency(amount)}")
+        hovers.append("<br>".join(parts))
+
+    return go.Pie(
+        labels=grouped[field].astype(str).tolist(),
+        values=grouped["Market Value"].astype(float).tolist(),
+        hole=0.44 if account_id is None else 0.48,
+        name=str(account_id) if account_id is not None else None,
+        text=inner_text,
+        texttemplate="%{text}<br>%{percent}",
+        textposition="inside",
+        insidetextorientation="horizontal",
+        textinfo="none",
+        hovertext=hovers,
+        hovertemplate="%{hovertext}<br>Weight: %{percent}<extra></extra>",
+        showlegend=showlegend,
+        sort=False,
     )
 
 
 def make_allocation_chart(holdings: pd.DataFrame, field: str = "Ticker", title: str = "Allocation") -> go.Figure:
-    if holdings is None or holdings.empty or field not in holdings.columns:
-        return labeled_empty_figure(title, chart_label(field), "Market Value ($)")
-    active = holdings[holdings["Holding Status"] == "Active"].copy()
+    active = _donut_active_rows(holdings, field)
     if active.empty:
         return labeled_empty_figure(title, chart_label(field), "Market Value ($)")
-
-    if field == "Ticker" and "Shares" in active.columns:
-        data = (
-            active.groupby(field, as_index=False)
-            .agg({"Market Value": "sum", "Shares": "sum", "Account ID": "nunique"})
-            .rename(columns={"Account ID": "Account Count"})
-            .sort_values("Market Value", ascending=False)
-        )
-        customdata = np.stack([
-            pd.to_numeric(data["Shares"], errors="coerce").fillna(0.0),
-            pd.to_numeric(data["Account Count"], errors="coerce").fillna(0.0),
-        ], axis=-1)
-    else:
-        data = active.groupby(field, as_index=False)["Market Value"].sum().sort_values("Market Value", ascending=False)
-        customdata = None
-
-    fig = px.pie(
-        data,
-        names=field,
-        values="Market Value",
-        hole=0.44,
-        title=title,
-        labels={field: chart_label(field), "Market Value": "Market Value ($)"},
-    )
-    fig.update_traces(
-        textposition="inside",
-        textinfo="none",
-        texttemplate=_pie_texttemplate(field, show_account_count=(field == "Ticker")),
-        insidetextorientation="horizontal",
-        customdata=customdata,
-        hovertemplate=_pie_hovertemplate(field, include_account_count=(field == "Ticker")),
-    )
-    fig.update_layout(uniformtext_minsize=8, uniformtext_mode="show")
+    grouped = _donut_grouped_rows(active, field, include_account_count=(field == "Ticker"))
+    if grouped.empty:
+        return labeled_empty_figure(title, chart_label(field), "Market Value ($)")
+    fig = go.Figure(_build_allocation_pie(grouped, field, show_account_count=(field == "Ticker")))
+    fig.update_layout(title=title, uniformtext_minsize=8, uniformtext_mode="show")
     return apply_chart_theme(fig, height=420, legend_title=chart_label(field), top=76, bottom=54, left=42, right=78)
 
 
 def _account_allocation_active_data(holdings: pd.DataFrame, field: str) -> pd.DataFrame:
-    """Return active account-level allocation rows with positive market value."""
-    if holdings is None or holdings.empty or field not in holdings.columns or "Account ID" not in holdings.columns:
+    """Return finite, positive holdings and cash amounts for account donut charts."""
+    if holdings is None or "Account ID" not in holdings.columns:
         return pd.DataFrame()
-    active = holdings[holdings["Holding Status"] == "Active"].copy() if "Holding Status" in holdings.columns else holdings.copy()
-    if "Market Value" not in active.columns:
-        return pd.DataFrame()
-    active["Market Value"] = pd.to_numeric(active["Market Value"], errors="coerce").fillna(0.0)
-    active = active[active["Market Value"] > 0].copy()
-    return active
+    return _donut_active_rows(holdings, field)
 
 
 def _account_allocation_order(active: pd.DataFrame, max_accounts: Optional[int] = None) -> List[str]:
@@ -2181,50 +2245,15 @@ def _account_allocation_order(active: pd.DataFrame, max_accounts: Optional[int] 
 
 
 def make_single_account_allocation_donut_chart(active: pd.DataFrame, account_id: str, field: str = "Ticker") -> go.Figure:
-    """Render one Account ID allocation donut.
-
-    v1.0.25 intentionally renders one Plotly chart per account instead of one large
-    subplot figure. Streamlit/CSS can then wrap the account cards on tablets and
-    phones, preventing all account donuts from being squeezed into one mobile row.
-    """
+    """Render one responsive Account ID allocation donut, including cash in USD."""
     account_title = compact_account_id(account_id, max_len=18)
-    if active is None or active.empty or field not in active.columns:
+    if active is None or active.empty or field not in active.columns or "Account ID" not in active.columns:
         return labeled_empty_figure(account_title, chart_label(field), "Market Value ($)")
-
-    subset = active[active["Account ID"].astype(str) == str(account_id)].copy()
+    subset = _donut_active_rows(active[active["Account ID"].astype(str) == str(account_id)], field)
     if subset.empty:
         return labeled_empty_figure(account_title, chart_label(field), "Market Value ($)")
-
-    if field == "Ticker" and "Shares" in subset.columns:
-        grouped = (
-            subset.groupby(field, as_index=False)
-            .agg({"Market Value": "sum", "Shares": "sum"})
-            .sort_values("Market Value", ascending=False)
-        )
-        customdata = np.stack([
-            pd.to_numeric(grouped["Shares"], errors="coerce").fillna(0.0),
-        ], axis=-1)
-    else:
-        grouped = subset.groupby(field, as_index=False)["Market Value"].sum().sort_values("Market Value", ascending=False)
-        customdata = None
-
-    fig = go.Figure(
-        data=[
-            go.Pie(
-                labels=grouped[field],
-                values=grouped["Market Value"],
-                hole=0.48,
-                name=str(account_id),
-                textinfo="none",
-                texttemplate=_pie_texttemplate(field, show_account_count=False),
-                textposition="inside",
-                insidetextorientation="horizontal",
-                customdata=customdata,
-                hovertemplate=_pie_hovertemplate(field, account_id, include_account_count=False),
-                showlegend=False,
-            )
-        ]
-    )
+    grouped = _donut_grouped_rows(subset, field)
+    fig = go.Figure(_build_allocation_pie(grouped, field, account_id=str(account_id), showlegend=False))
     fig.update_layout(title=account_title, uniformtext_minsize=8, uniformtext_mode="show")
     return apply_chart_theme(fig, height=345, legend_title=chart_label(field), top=58, bottom=34, left=14, right=14)
 
@@ -2235,12 +2264,7 @@ def make_account_allocation_donut_chart(
     title: str = "Allocation by Account ID",
     max_accounts: Optional[int] = None,
 ) -> go.Figure:
-    """Backward-compatible fallback summary figure for account allocation.
-
-    The Overview tab now uses render_account_allocation_donut_grid() for responsive
-    mobile behavior. This fallback remains available if another page needs a single
-    Plotly figure.
-    """
+    """Backward-compatible subplot layout with the same safe slice labels."""
     active = _account_allocation_active_data(holdings, field)
     if active.empty:
         return labeled_empty_figure(title, chart_label(field), "Market Value ($)")
@@ -2265,34 +2289,10 @@ def make_account_allocation_donut_chart(
     for i, account_id in enumerate(account_order):
         r = i // cols + 1
         c = i % cols + 1
-        subset = active[active["Account ID"].astype(str) == account_id].copy()
-        if field == "Ticker" and "Shares" in subset.columns:
-            grouped = (
-                subset.groupby(field, as_index=False)
-                .agg({"Market Value": "sum", "Shares": "sum"})
-                .sort_values("Market Value", ascending=False)
-            )
-            customdata = np.stack([pd.to_numeric(grouped["Shares"], errors="coerce").fillna(0.0)], axis=-1)
-        else:
-            grouped = subset.groupby(field, as_index=False)["Market Value"].sum().sort_values("Market Value", ascending=False)
-            customdata = None
-        fig.add_trace(
-            go.Pie(
-                labels=grouped[field],
-                values=grouped["Market Value"],
-                hole=0.48,
-                name=str(account_id),
-                textinfo="none",
-                texttemplate=_pie_texttemplate(field, show_account_count=False),
-                textposition="inside",
-                insidetextorientation="horizontal",
-                customdata=customdata,
-                hovertemplate=_pie_hovertemplate(field, account_id, include_account_count=False),
-                showlegend=False,
-            ),
-            row=r,
-            col=c,
-        )
+        subset = active[active["Account ID"].astype(str) == account_id]
+        grouped = _donut_grouped_rows(subset, field)
+        if not grouped.empty:
+            fig.add_trace(_build_allocation_pie(grouped, field, account_id=str(account_id), showlegend=False), row=r, col=c)
 
     dynamic_height = 470 if rows == 1 else 760
     fig.update_layout(title=title, uniformtext_minsize=8, uniformtext_mode="show")
@@ -2307,16 +2307,9 @@ def render_account_allocation_donut_grid(
     max_accounts: Optional[int] = None,
     key_prefix: str = "account_allocation",
 ) -> None:
-    """Render Account ID-level donut charts with a responsive mobile-friendly layout.
+    """Render individual account donuts that collapse to one chart per mobile row.
 
-    Desktop rule remains the same as v1.0.21:
-    - 1 to 4 account charts: one row.
-    - 5+ account charts: two rows.
-
-    v1.0.25 change:
-    - Each account is rendered as its own Streamlit/Plotly chart instead of one
-      fixed subplot. The CSS media query can then wrap columns as the screen
-      narrows, down to one chart per row on small mobile screens.
+    Desktop: up to 4 accounts in one row; 5+ accounts distributed over two rows.
     """
     active = _account_allocation_active_data(holdings, field)
     if active.empty:
@@ -2343,7 +2336,6 @@ def render_account_allocation_donut_grid(
             with col:
                 fig = make_single_account_allocation_donut_chart(active, str(account_id), field)
                 st.plotly_chart(fig, use_container_width=True, key=f"{key_prefix}_{i}")
-
 
 def make_bar_chart(df: pd.DataFrame, x: str, y: str, title: str, color: Optional[str] = None) -> go.Figure:
     if df is None or df.empty or x not in df.columns or y not in df.columns:
