@@ -30,7 +30,7 @@ from zoneinfo import ZoneInfo
 
 APP_TITLE = "Household Wealth Tracker"
 CREATOR_NAME = "Eucalyptuss"
-APP_VERSION = "1.0.30"
+APP_VERSION = "1.0.31"
 BASE_DIR = Path(__file__).resolve().parent
 ET = ZoneInfo("America/New_York")
 TODAY = datetime.now(ET).date()
@@ -265,6 +265,27 @@ def inject_css() -> None:
             font-weight: 750 !important;
             text-anchor: middle !important;
         }
+        /* Status watchlist: compact, scrollable, and readable on mobile/dark mode. */
+        .hwt-alert-wrap { max-height: 575px; margin: 0.45rem 0 0.7rem; }
+        .hwt-alert-table { min-width: 1150px; font-size: 0.81rem; font-variant-numeric: tabular-nums; }
+        .hwt-alert-table th { padding: 0.60rem 0.55rem; }
+        .hwt-alert-table td { padding: 0.52rem 0.55rem; }
+        .hwt-alert-table th:first-child { position: sticky; left: 0; z-index: 3; }
+        .hwt-alert-table td:first-child { position: sticky; left: 0; z-index: 1; background: var(--hwt-bg) !important; }
+        .hwt-alert-table tr:nth-child(even) td:first-child { background: var(--hwt-soft-bg) !important; }
+        .hwt-alert-ticker { color: var(--hwt-text) !important; font-weight: 850; }
+        .hwt-alert-num { text-align: right; }
+        .hwt-alert-bold { font-weight: 850; }
+        .hwt-alert-muted { color: var(--hwt-muted) !important; font-size: 0.78rem; }
+        .hwt-alert-badge { display: inline-block; padding: 0.19rem 0.46rem; border-radius: 999px; font-size: 0.73rem; line-height: 1.35; font-weight: 800; white-space: nowrap; border: 1px solid var(--hwt-border); }
+        .hwt-alert-table .hwt-alert-badge.hwt-alert-hit { color: var(--hwt-positive) !important; background: color-mix(in srgb, var(--hwt-positive) 13%, transparent); }
+        .hwt-alert-table .hwt-alert-badge.hwt-alert-near { color: var(--hwt-estimated) !important; background: color-mix(in srgb, var(--hwt-estimated) 12%, transparent); }
+        .hwt-alert-table .hwt-alert-badge.hwt-alert-error { color: var(--hwt-negative) !important; background: color-mix(in srgb, var(--hwt-negative) 10%, transparent); }
+        .hwt-alert-table .hwt-alert-badge.hwt-alert-waiting, .hwt-alert-table .hwt-alert-badge.hwt-alert-quiet { color: var(--hwt-muted) !important; }
+        .hwt-alert-hit-text { color: var(--hwt-positive) !important; font-weight: 850; }
+        .hwt-alert-near-text { color: var(--hwt-estimated) !important; font-weight: 850; }
+        .hwt-alert-condition { font-weight: 700; }
+        @media (max-width: 560px) { .hwt-alert-table { font-size: 0.78rem; } }
         </style>
         """,
         unsafe_allow_html=True,
@@ -969,6 +990,10 @@ def evaluate_price_alerts(
             "Current Price": price if good_price else float("nan"),
             "Status": status, "Last Checked": stamp if enabled else "Not monitored",
             "Note": str(rule["note"]),
+            "Rule Key": key,
+            # as_of identifies when yfinance lookup ran, not the actual exchange trade time.
+            "Price Fetched At": str(quote.get("as_of", "") or "") if good_price else "",
+            "Last Triggered": str(old.get("last_triggered_at", "") or ""),
             "Error": (str(quote.get("error", "")) if enabled else "") or ("No valid USD quote" if enabled and not good_price else ""),
         })
     return pd.DataFrame(rows), next_state, triggers
@@ -3416,6 +3441,184 @@ def render_sidebar(accounts_clean: pd.DataFrame, tx_clean: pd.DataFrame) -> Dict
         "auto_refresh_seconds": int(auto_refresh_seconds),
     }
 
+# Display calculations are kept independent of trigger evaluation so that
+# formatting and sorting cannot change notification state.
+ALERT_NEAR_TARGET_THRESHOLD = 0.02  # 2% move from last price to threshold.
+
+
+def build_price_alert_display_table(
+    rules: pd.DataFrame,
+    statuses: Optional[pd.DataFrame],
+    monitoring_enabled: bool,
+) -> pd.DataFrame:
+    """Build a complete alert watchlist even before the first auto-refresh.
+
+    Gap ($) = last USD price - target; Gap (%) = (last price / target) - 1.
+    Move Needed (%) = max(0, signed move still needed to meet the rule) /
+    last price; it is zero when the target is already reached. The denominator
+    differs from Gap (%) intentionally: one is target-relative, the other is
+    current-price-relative. Missing/invalid quotes never become zero prices.
+    """
+    columns = [
+        "Ticker", "Status", "Direction", "Current Price", "Target Price",
+        "Gap ($)", "Gap (%)", "Move Needed (%)", "Move Direction",
+        "Last Checked", "Price Fetched At", "Last Triggered",
+        "Alert ID", "Note", "Error", "Rule Key", "Sort Rank", "Sort Distance",
+    ]
+    if rules is None or rules.empty:
+        return pd.DataFrame(columns=columns)
+
+    status_by_key: Dict[str, Dict[str, Any]] = {}
+    if statuses is not None and not statuses.empty and "Rule Key" in statuses.columns:
+        for _, prior_row in statuses.iterrows():
+            status_by_key[str(prior_row["Rule Key"])] = prior_row.to_dict()
+
+    def finite_positive(value: Any) -> float:
+        try:
+            converted = float(value)
+        except (TypeError, ValueError, OverflowError):
+            return float("nan")
+        return converted if math.isfinite(converted) and converted > 0 else float("nan")
+
+    output: List[Dict[str, Any]] = []
+    for _, rule in rules.iterrows():
+        key = str(rule["rule_key"])
+        prior = status_by_key.get(key, {})
+        enabled = bool(rule["enabled"])
+        target = finite_positive(rule["target_price"])
+        price = finite_positive(prior.get("Current Price")) if enabled else float("nan")
+        valid_quote = math.isfinite(price) and math.isfinite(target)
+        deviation_usd = price - target if valid_quote else float("nan")
+        deviation = deviation_usd / target if valid_quote else float("nan")
+        direction = str(rule["direction"])
+        reached = valid_quote and (price >= target if direction == "ABOVE" else price <= target)
+        distance = (max(target - price, 0.0) if direction == "ABOVE" else max(price - target, 0.0)) / price if valid_quote else float("nan")
+        condition = "↑" if direction == "ABOVE" else "↓"
+
+        # Monitoring OFF never suggests that a previous quote is live/current.
+        if not enabled:
+            status = "Disabled"
+            rank = 5
+        elif not monitoring_enabled:
+            status = "Paused"
+            rank = 4
+        elif not prior:
+            status = "Awaiting first check"
+            rank = 3
+        elif reached:
+            status = str(prior.get("Status", "Reached"))
+            if status not in {"Triggered", "Reached (already notified)"}:
+                status = "Reached"
+            rank = 0
+        elif valid_quote:
+            status = "Near target" if distance <= ALERT_NEAR_TARGET_THRESHOLD else "Waiting"
+            rank = 1 if status == "Near target" else 2
+        else:
+            status = str(prior.get("Status", "Price unavailable"))
+            rank = 3
+
+        output.append({
+            "Ticker": str(rule["ticker"]),
+            "Status": status,
+            "Direction": direction,
+            "Current Price": price,
+            "Target Price": target,
+            "Gap ($)": deviation_usd,
+            "Gap (%)": deviation,
+            "Move Needed (%)": distance,
+            "Move Direction": condition,
+            "Last Checked": str(prior.get("Last Checked", "Not checked") or "Not checked") if enabled else "—",
+            "Price Fetched At": str(prior.get("Price Fetched At", "") or ""),
+            "Last Triggered": str(prior.get("Last Triggered", "") or ""),
+            "Alert ID": str(rule["alert_id"]),
+            "Note": str(rule.get("note", "")),
+            "Error": str(prior.get("Error", "") or ""),
+            "Rule Key": key,
+            "Sort Rank": rank,
+            "Sort Distance": distance if valid_quote else float("inf"),
+        })
+    return pd.DataFrame(output, columns=columns).sort_values(
+        ["Sort Rank", "Sort Distance", "Ticker", "Alert ID"],
+        ascending=[True, True, True, True], kind="stable",
+    ).reset_index(drop=True)
+
+
+def price_alerts_table_html(display: pd.DataFrame) -> str:
+    """Generate compact HTML watchlist; escape all user-defined CSV fields."""
+    head = (
+        ("Ticker", "Monitored ticker"),
+        ("Status", "Current alert monitoring status"),
+        ("Current", "Last valid USD quote from the most recent monitoring run"),
+        ("Target", "Alert trigger price in USD"),
+        ("Gap ($)", "Current price minus target price (USD)"),
+        ("Gap (%)", "(Current price / target price - 1) × 100"),
+        ("To trigger", "Move needed from current price to meet the trigger; 0% when already reached"),
+        ("Condition", "ABOVE: ≥ target, BELOW: ≤ target"),
+        ("Last check (ET)", "Latest monitoring check, Eastern Time"),
+        ("Last alert (ET)", "Most recent threshold crossing notification"),
+        ("Note", "User-provided description"),
+    )
+    out = ["<div class='hwt-table-wrap hwt-alert-wrap' role='region' aria-label='Price alert watchlist' tabindex='0'>",
+           "<table class='hwt-table hwt-alert-table'><thead><tr>"]
+    for label, help_text in head:
+        out.append(f"<th scope='col' title='{html.escape(help_text, quote=True)}'>{html.escape(label)}</th>")
+    out.append("</tr></thead><tbody>")
+    for _, row in display.iterrows():
+        status = str(row["Status"])
+        tone = ("hit" if status in {"Triggered", "Reached", "Reached (already notified)"}
+                else "near" if status == "Near target"
+                else "waiting" if status == "Waiting"
+                else "error" if "unavailable" in status.lower() or "mismatch" in status.lower()
+                else "quiet")
+        # Tooltip preserves the full status, error, and previous notification time.
+        tooltip = " | ".join(part for part in [
+            status, f"Alert: {row['Alert ID']}",
+            f"Price fetched: {row['Price Fetched At']}" if row['Price Fetched At'] else "",
+            f"Last triggered: {row['Last Triggered']}" if row['Last Triggered'] else "",
+            f"Error: {row['Error']}" if row['Error'] else "",
+        ] if part)
+        escaped_tooltip = html.escape(tooltip, quote=True)
+        def format_money(value: Any, *, signed: bool = False) -> str:
+            try:
+                number = float(value)
+                if not math.isfinite(number):
+                    return "—"
+            except (ValueError, TypeError):
+                return "—"
+            if signed:
+                return f"+${number:,.2f}" if number > 0 else (f"-${abs(number):,.2f}" if number < 0 else "$0.00")
+            return f"${number:,.2f}"
+        def format_percent(value: Any, *, signed: bool = False) -> str:
+            try:
+                number = float(value)
+                return (f"{number:+.2%}" if signed else f"{number:.2%}") if math.isfinite(number) else "—"
+            except (ValueError, TypeError):
+                return "—"
+        movement = format_percent(row["Move Needed (%)"])
+        move_str = "—" if movement == "—" else ("Reached" if row["Sort Rank"] == 0 else f"{row['Move Direction']} {movement}")
+        note = str(row["Note"] or "")
+        note_short = note if len(note) <= 42 else note[:39] + "…"
+        cells = [
+            (html.escape(str(row['Ticker'])), "hwt-alert-ticker"),
+            (f"<span class='hwt-alert-badge hwt-alert-{tone}' title='{escaped_tooltip}'>{html.escape(status)}</span>", ""),
+            (html.escape(format_money(row["Current Price"])), "hwt-alert-num hwt-alert-bold"),
+            (html.escape(format_money(row["Target Price"])), "hwt-alert-num"),
+            (html.escape(format_money(row["Gap ($)"], signed=True)), "hwt-alert-num"),
+            (html.escape(format_percent(row["Gap (%)"], signed=True)), "hwt-alert-num"),
+            (html.escape(move_str), f"hwt-alert-num hwt-alert-{tone}-text"),
+            (f"<span title='{html.escape('At or above target' if row['Direction'] == 'ABOVE' else 'At or below target', quote=True)}'>{html.escape(row['Move Direction'])} {html.escape(row['Direction'])}</span>", "hwt-alert-condition"),
+            (html.escape(str(row["Last Checked"])), "hwt-alert-muted"),
+            (html.escape(str(row["Last Triggered"] or "—")), "hwt-alert-muted"),
+            (f"<span title='{html.escape(note, quote=True)}'>{html.escape(note_short)}</span>", "hwt-alert-muted"),
+        ]
+        out.append("<tr>")
+        for content, cls in cells:
+            out.append(f"<td class='{cls}'>{content}</td>")
+        out.append("</tr>")
+    out.append("</tbody></table></div>")
+    return "".join(out)
+
+
 def render_target_alerts_overview() -> None:
     rules = st.session_state.get("_price_alert_rules", pd.DataFrame())
     if rules is None or rules.empty:
@@ -3423,21 +3626,31 @@ def render_target_alerts_overview() -> None:
     enabled = bool(st.session_state.get("_price_alert_monitor_enabled", False))
     statuses = st.session_state.get("price_alert_statuses", pd.DataFrame())
     events = st.session_state.get("price_alert_events", [])
-    active = statuses[statuses["Status"].isin(["Triggered", "Reached (already notified)"])] if not statuses.empty else pd.DataFrame()
-    if enabled and not active.empty:
-        summaries = ", ".join(f"{r['Ticker']} {r['Direction']} ${r['Target Price']:,.2f} (last ${r['Current Price']:,.2f})" for _, r in active.head(5).iterrows())
-        st.warning(f"Target price reached: {summaries}" + (" …" if len(active) > 5 else ""))
-    title = f"Target Price Alerts ({len(rules)} rules)"
-    with st.expander(title, expanded=not active.empty):
-        st.caption("Monitoring ACTIVE" if enabled else "Monitoring PAUSED — enable Auto Refresh Online Data to check target prices.")
-        if statuses is not None and not statuses.empty:
-            st.dataframe(statuses, hide_index=True, use_container_width=True)
-        else:
-            st.info("No monitoring results yet. Enable Auto Refresh Online Data to begin checking prices.")
+    display = build_price_alert_display_table(rules, statuses, enabled)
+    reached = display[display["Sort Rank"] == 0] if enabled else display.iloc[0:0]
+    if not reached.empty:
+        summaries = ", ".join(f"{r['Ticker']} {r['Direction']} ${r['Target Price']:,.2f} (last ${r['Current Price']:,.2f})" for _, r in reached.head(5).iterrows())
+        st.warning(f"Target price reached: {summaries}" + (" …" if len(reached) > 5 else ""))
+
+    with st.expander(f"Target Price Alerts ({len(rules)} rules)", expanded=not reached.empty):
+        st.caption("Monitoring ACTIVE — values are from the most recent price check." if enabled else "Monitoring PAUSED — enable Auto Refresh Online Data to check target prices. Displayed prices are previous observations, not live quotes.")
+        c1, c2, c3, c4 = st.columns(4)
+        with c1:
+            st.metric("Reached", int((display["Sort Rank"] == 0).sum()) if enabled else "—")
+        with c2:
+            st.metric("Near (≤2%)", int((display["Status"] == "Near target").sum()) if enabled else "—")
+        with c3:
+            st.metric("Waiting", int((display["Status"] == "Waiting").sum()) if enabled else "—")
+        with c4:
+            st.metric("Unchecked / No quote", int((display["Sort Rank"] == 3).sum()) if enabled else "—")
+        st.markdown(price_alerts_table_html(display), unsafe_allow_html=True)
+        st.caption("Gap (%) = (current − target) / target; signed values show which side of the target the last price is on. To trigger = % move still needed from current price; ↑ rise or ↓ fall. 'Near' means ≤2% away (not an early alert).")
+        st.caption("Quotes may be delayed or reflect the last close. Last check is the app's check time, not the exchange trade timestamp. Scroll the table horizontally on small screens; hover a status badge for error/trigger details.")
+        st.download_button("Download watchlist status CSV", data=to_csv_bytes(display.drop(columns=["Rule Key", "Sort Rank", "Sort Distance"])), file_name="price_alert_status.csv", mime="text/csv", key="download_price_alert_status")
         if events:
-            st.caption("Recent in-session alert events (most recent first)")
+            st.caption("Recent alert triggers (latest 20 events first)")
             st.dataframe(pd.DataFrame(list(reversed(events[-20:]))), hide_index=True, use_container_width=True)
-        st.caption("Uses the last available Yahoo Finance quote; data may be delayed or stale, including outside market hours. Alerts appear only while this page session runs.")
+        st.caption("Alerts run only while this Streamlit page session is active. Rules are saved by Save alerts CSV; runtime history and latch state are session-only.")
 
 
 # ============================================================
