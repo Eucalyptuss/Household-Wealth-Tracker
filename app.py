@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import html
+import hashlib
+import re
 import io
 import math
 from collections import defaultdict, deque
@@ -28,7 +30,7 @@ from zoneinfo import ZoneInfo
 
 APP_TITLE = "Household Wealth Tracker"
 CREATOR_NAME = "Eucalyptuss"
-APP_VERSION = "1.0.29"
+APP_VERSION = "1.0.30"
 BASE_DIR = Path(__file__).resolve().parent
 ET = ZoneInfo("America/New_York")
 TODAY = datetime.now(ET).date()
@@ -67,6 +69,14 @@ CASH_EVENT_TYPES = ["INITIAL_BALANCE", "CONTRIBUTION", "WITHDRAWAL", "INTEREST",
 CASH_REQUIRED_COLUMNS = ["date", "account_id", "event_type", "amount"]
 CASH_OPTIONAL_DEFAULTS = {"cash_label": "Cash", "annual_yield": 0.0, "note": ""}
 CASH_COLUMNS = CASH_REQUIRED_COLUMNS + list(CASH_OPTIONAL_DEFAULTS.keys())
+
+PRICE_ALERTS_CSV_NAME = "price_alerts.csv"
+SAMPLE_PRICE_ALERTS_CSV_NAME = "sample_price_alerts.csv"
+PRICE_ALERT_REQUIRED_COLUMNS = ["ticker", "target_price", "direction"]
+PRICE_ALERT_OPTIONAL_DEFAULTS = {"alert_id": "", "enabled": True, "note": ""}
+PRICE_ALERT_COLUMNS = ["alert_id"] + PRICE_ALERT_REQUIRED_COLUMNS + ["enabled", "note"]
+ALERT_DIRECTIONS = {"ABOVE", "BELOW"}
+ALERT_TICKER_PATTERN = re.compile(r"^[A-Z0-9^][A-Z0-9.\-^=_]{0,24}$")
 
 PERIOD_MAP = {
     "1M": "1mo",
@@ -110,6 +120,12 @@ SAMPLE_CASH_EVENTS_CSV = """date,account_id,event_type,amount,cash_label,annual_
 2026-10-07,ME_RH_TAXABLE,INITIAL_BALANCE,500.00,Cash,0.0000,Starting brokerage cash balance
 2026-10-07,SP_FID_IRA,INITIAL_BALANCE,750.00,SPAXX,0.0349,Starting SPAXX cash balance
 2026-10-07,SP_FID_TAXABLE,INITIAL_BALANCE,250.00,Cash,0.0000,Starting brokerage cash balance
+"""
+
+# The shipped alert CSV intentionally contains no live triggers.
+SAMPLE_PRICE_ALERTS_CSV = """alert_id,ticker,target_price,direction,enabled,note
+example_high,AAPL,250,ABOVE,FALSE,Example only; enable to monitor
+example_low,MSFT,350,BELOW,FALSE,Example only; enable to monitor
 """
 
 st.set_page_config(
@@ -397,6 +413,8 @@ def embedded_sample_df(kind: str) -> pd.DataFrame:
         return drop_fully_empty_rows(pd.read_csv(io.StringIO(SAMPLE_DIVIDENDS_CSV)))
     if kind == "cash_events":
         return drop_fully_empty_rows(pd.read_csv(io.StringIO(SAMPLE_CASH_EVENTS_CSV)))
+    if kind == "price_alerts":
+        return drop_fully_empty_rows(pd.read_csv(io.StringIO(SAMPLE_PRICE_ALERTS_CSV)))
     raise ValueError(kind)
 
 
@@ -441,15 +459,22 @@ def load_file_into_session(kind: str) -> None:
         st.session_state.cash_events_source = source
         st.session_state.cash_events_source_type = source_type
         st.session_state.cash_events_signature = sig
+    elif kind == "price_alerts":
+        df, source, source_type, sig = load_default_csv(PRICE_ALERTS_CSV_NAME, SAMPLE_PRICE_ALERTS_CSV_NAME, "price_alerts")
+        st.session_state.price_alerts_df = df
+        st.session_state.price_alerts_source = source
+        st.session_state.price_alerts_source_type = source_type
+        st.session_state.price_alerts_signature = sig
 
 
 def initialize_session_state() -> None:
-    for kind in ["accounts", "portfolio", "dividends", "cash_events"]:
+    for kind in ["accounts", "portfolio", "dividends", "cash_events", "price_alerts"]:
         key = {
             "accounts": "accounts_df",
             "portfolio": "portfolio_df",
             "dividends": "dividends_df",
             "cash_events": "cash_events_df",
+            "price_alerts": "price_alerts_df",
         }[kind]
         if key not in st.session_state:
             load_file_into_session(kind)
@@ -804,6 +829,161 @@ def clean_and_validate_cash_events(df: pd.DataFrame, known_account_ids: Iterable
     for _, row in clean.loc[duplicated].iterrows():
         add_quality_issue(issues, "Warning", row["row_id"], "cash.duplicate row", row["account_id"], "Potential duplicate cash event row.")
     return clean, pd.DataFrame(issues), valid_mask, migrated
+
+# ============================================================
+# Target price alerts: CSV validation and independent price monitoring
+# ============================================================
+
+
+def _parse_alert_enabled(value: Any) -> Optional[bool]:
+    if isinstance(value, (bool, np.bool_)):
+        return bool(value)
+    if _is_blank_like(value):
+        return True
+    normalized = str(value).strip().upper()
+    if normalized in {"TRUE", "YES", "Y", "1", "ON"}:
+        return True
+    if normalized in {"FALSE", "NO", "N", "0", "OFF"}:
+        return False
+    return None
+
+
+def normalize_price_alerts(raw: pd.DataFrame) -> Tuple[pd.DataFrame, pd.DataFrame]:
+    """Validate user CSV; invalid rows cannot trigger an alert.
+
+    'direction' accepts ABOVE (>= target) or BELOW (<= target).
+    An omitted alert_id is derived deterministically from ticker/direction/target.
+    """
+    issues: List[Dict[str, Any]] = []
+    if raw is None or raw.empty:
+        return pd.DataFrame(columns=PRICE_ALERT_COLUMNS + ["rule_key"]), pd.DataFrame(columns=["Severity", "Row", "Column", "Raw Value", "Issue"])
+
+    frame = standardize_columns(raw)
+    missing = [col for col in PRICE_ALERT_REQUIRED_COLUMNS if col not in frame.columns]
+    if missing:
+        for name in missing:
+            add_quality_issue(issues, "Error", "ALL", name, "Missing", f"price_alerts.csv requires the '{name}' column.")
+        return pd.DataFrame(columns=PRICE_ALERT_COLUMNS + ["rule_key"]), pd.DataFrame(issues)
+
+    for name, default in PRICE_ALERT_OPTIONAL_DEFAULTS.items():
+        if name not in frame:
+            frame[name] = default
+    frame = frame[PRICE_ALERT_COLUMNS].copy()
+    valid: List[Dict[str, Any]] = []
+    used_ids: set[str] = set()
+    for i, row in frame.iterrows():
+        row_num = i + 2  # CSV header is row 1.
+        ticker = "" if _is_blank_like(row["ticker"]) else str(row["ticker"]).strip().upper()
+        direction = "" if _is_blank_like(row["direction"]) else str(row["direction"]).strip().upper()
+        target = pd.to_numeric(row["target_price"], errors="coerce")
+        enabled = _parse_alert_enabled(row["enabled"])
+        explicit_id = "" if _is_blank_like(row["alert_id"]) else str(row["alert_id"]).strip()
+        problem = None
+        if not ALERT_TICKER_PATTERN.fullmatch(ticker):
+            problem = ("ticker", ticker, "Invalid ticker symbol.")
+        elif not np.isfinite(target) or float(target) <= 0:
+            problem = ("target_price", row["target_price"], "Target price must be a finite positive number.")
+        elif direction not in ALERT_DIRECTIONS:
+            problem = ("direction", direction, "Direction must be ABOVE or BELOW.")
+        elif enabled is None:
+            problem = ("enabled", row["enabled"], "Use TRUE or FALSE for enabled.")
+        if problem:
+            add_quality_issue(issues, "Error", row_num, *problem)
+            continue
+        # An empty ID uses ticker+direction+target. Duplicate IDs are rejected.
+        alert_id = explicit_id or f"{ticker}|{direction}|{float(target):.8f}"
+        if alert_id in used_ids:
+            add_quality_issue(issues, "Error", row_num, "alert_id", alert_id, "Duplicate alert_id; each active rule must have a unique ID.")
+            continue
+        used_ids.add(alert_id)
+        signature = hashlib.sha256(f"{alert_id}|{ticker}|{direction}|{float(target):.8f}".encode("utf-8")).hexdigest()[:24]
+        valid.append({
+            "alert_id": alert_id,
+            "ticker": ticker,
+            "target_price": float(target),
+            "direction": direction,
+            "enabled": bool(enabled),
+            "note": "" if _is_blank_like(row["note"]) else str(row["note"]).strip(),
+            "rule_key": signature,
+        })
+    return pd.DataFrame(valid, columns=PRICE_ALERT_COLUMNS + ["rule_key"]), pd.DataFrame(issues, columns=["Severity", "Row", "Column", "Raw Value", "Issue"])
+
+
+def evaluate_price_alerts(
+    rules: pd.DataFrame,
+    quotes: Dict[str, Dict[str, Any]],
+    previous_state: Optional[Dict[str, Dict[str, Any]]] = None,
+    checked_at: Optional[str] = None,
+) -> Tuple[pd.DataFrame, Dict[str, Dict[str, Any]], List[Dict[str, Any]]]:
+    """Pure edge-trigger evaluator: notify on first reach, rearm after exit.
+
+    Quote failures never rearm and never trigger alerts. The state key includes
+    rule parameters, so modifying the threshold starts a new monitoring rule.
+    """
+    stamp = checked_at or now_et_str()
+    prior = previous_state or {}
+    next_state: Dict[str, Dict[str, Any]] = {}
+    rows: List[Dict[str, Any]] = []
+    triggers: List[Dict[str, Any]] = []
+    for _, rule in rules.iterrows():
+        key = str(rule["rule_key"])
+        old = dict(prior.get(key, {}))
+        latched = bool(old.get("latched", False))
+        ticker = str(rule["ticker"])
+        target = float(rule["target_price"])
+        direction = str(rule["direction"])
+        enabled = bool(rule["enabled"])
+        quote = quotes.get(ticker, {}) if enabled else {}
+        raw_price = quote.get("price")
+        try:
+            price = float(raw_price)
+        except (TypeError, ValueError):
+            price = float("nan")
+        currency = str(quote.get("currency", "USD") or "USD").upper()
+        good_price = math.isfinite(price) and price > 0 and currency == "USD"
+        status = "Disabled" if not enabled else "Price unavailable"
+        if enabled and good_price:
+            reached = price >= target if direction == "ABOVE" else price <= target
+            if reached and not latched:
+                status = "Triggered"
+                old["last_triggered_at"] = stamp
+                triggers.append({
+                    "Ticker": ticker, "Direction": direction,
+                    "Target Price": target, "Current Price": price,
+                    "Triggered At": stamp, "Alert ID": str(rule["alert_id"]),
+                    "Note": str(rule["note"]),
+                })
+            elif reached:
+                status = "Reached (already notified)"
+            else:
+                status = "Waiting"
+            old["latched"] = reached
+        elif enabled and currency != "USD":
+            status = f"Currency mismatch ({currency})"
+        # No reliable quote: retain the previous latch state to avoid false rearming.
+        old["last_checked_at"] = stamp if enabled else old.get("last_checked_at", "")
+        next_state[key] = old
+        rows.append({
+            "Alert ID": str(rule["alert_id"]), "Ticker": ticker,
+            "Direction": direction, "Target Price": target,
+            "Current Price": price if good_price else float("nan"),
+            "Status": status, "Last Checked": stamp if enabled else "Not monitored",
+            "Note": str(rule["note"]),
+            "Error": (str(quote.get("error", "")) if enabled else "") or ("No valid USD quote" if enabled and not good_price else ""),
+        })
+    return pd.DataFrame(rows), next_state, triggers
+
+
+def collect_alert_quotes(rules: pd.DataFrame, online_data: Dict[str, Dict[str, Any]]) -> Dict[str, Dict[str, Any]]:
+    """Reuse holdings quotes when possible; alert-only tickers need price lookups only."""
+    quotes: Dict[str, Dict[str, Any]] = {}
+    if rules is None or rules.empty:
+        return quotes
+    for ticker in rules.loc[rules["enabled"], "ticker"].unique():
+        saved = online_data.get(ticker, {}).get("price")
+        quotes[ticker] = saved if isinstance(saved, dict) else fetch_current_price(ticker)
+    return quotes
+
 
 # ============================================================
 # Online market data
@@ -2809,6 +2989,7 @@ def render_source_footer(last_refresh: str) -> None:
             <b>Portfolio Source:</b> {st.session_state.get('portfolio_source', 'unknown')} &nbsp; | &nbsp;
             <b>Dividend Source:</b> {st.session_state.get('dividends_source', 'unknown')} &nbsp; | &nbsp;
             <b>Cash Source:</b> {st.session_state.get('cash_events_source', 'unknown')} &nbsp; | &nbsp;
+            <b>Alert Source:</b> {html.escape(str(st.session_state.get('price_alerts_source', 'unknown')))} &nbsp; | &nbsp;
             <b>Accounts Source:</b> {st.session_state.get('accounts_source', 'unknown')}<br>
             <b>Last Online Refresh:</b> {last_refresh} &nbsp; | &nbsp;
             <b>Price Source:</b> yfinance &nbsp; | &nbsp;
@@ -3032,9 +3213,68 @@ def render_sidebar(accounts_clean: pd.DataFrame, tx_clean: pd.DataFrame) -> Dict
             last_count = st.session_state.get("_last_online_autorefresh_count", -1)
             if refresh_count != last_count:
                 st.session_state["_last_online_autorefresh_count"] = refresh_count
-                if refresh_count > 0:
-                    st.cache_data.clear()
-                    st.session_state.last_online_refresh = now_et_str()
+                # Refresh at activation (count=0), too. Otherwise old cached
+                # prices may trigger alerts before the first timed poll.
+                st.cache_data.clear()
+                st.session_state.last_online_refresh = now_et_str()
+
+    with st.sidebar.expander("Target Price Alerts (CSV)", expanded=False):
+        st.caption("ABOVE: latest price >= target; BELOW: latest price <= target. Checked only while Auto Refresh is enabled and the app session is open.")
+        uploaded_alerts = st.file_uploader("Upload price_alerts.csv", type=["csv"], key="price_alerts_uploader")
+        if uploaded_alerts is not None:
+            payload = uploaded_alerts.getvalue()
+            digest = hashlib.sha256(payload).hexdigest()
+            if digest != st.session_state.get("_price_alerts_upload_digest"):
+                try:
+                    candidate = pd.read_csv(io.BytesIO(payload))
+                    # Do not replace existing rules with malformed CSV.
+                    _, upload_issues = normalize_price_alerts(candidate)
+                    if any(x not in candidate.columns.str.strip().str.lower() for x in PRICE_ALERT_REQUIRED_COLUMNS):
+                        st.error("Invalid file: ticker, target_price and direction columns are required.")
+                    else:
+                        st.session_state.price_alerts_df = drop_fully_empty_rows(candidate)
+                        st.session_state.price_alerts_source = uploaded_alerts.name
+                        st.session_state.price_alerts_source_type = "uploaded"
+                        st.session_state.price_alerts_signature = f"upload::{digest}"
+                        st.session_state._price_alerts_upload_digest = digest
+                except Exception as exc:
+                    st.error(f"Could not read price alerts CSV: {exc}")
+        st.download_button(
+            "Download CSV Template",
+            data=SAMPLE_PRICE_ALERTS_CSV.encode("utf-8-sig"),
+            file_name=SAMPLE_PRICE_ALERTS_CSV_NAME,
+            mime="text/csv", use_container_width=True,
+        )
+        col_a, col_b = st.columns(2)
+        with col_a:
+            if st.button("Reload alerts CSV", use_container_width=True):
+                load_file_into_session("price_alerts")
+                # If a file remains attached to the upload widget, do not
+                # re-import it immediately on this rerun after a local reload.
+                if uploaded_alerts is not None:
+                    st.session_state._price_alerts_upload_digest = hashlib.sha256(uploaded_alerts.getvalue()).hexdigest()
+                st.rerun()
+        with col_b:
+            if st.button("Save alerts CSV", use_container_width=True):
+                try:
+                    path = BASE_DIR / PRICE_ALERTS_CSV_NAME
+                    path.write_bytes(to_csv_bytes(st.session_state.price_alerts_df))
+                    st.session_state.price_alerts_source = str(path)
+                    st.session_state.price_alerts_source_type = "local_file"
+                    st.success(f"Saved {PRICE_ALERTS_CSV_NAME} on the Streamlit server.")
+                except OSError as exc:
+                    st.error(f"Server file is not writable: {exc}")
+        rules_preview, issues_preview = normalize_price_alerts(st.session_state.price_alerts_df)
+        valid_enabled = int(rules_preview["enabled"].sum()) if not rules_preview.empty else 0
+        st.caption(f"Rules: {len(rules_preview)} valid / {valid_enabled} enabled; {len(issues_preview)} invalid rows. Source: {st.session_state.get('price_alerts_source', 'unknown')}")
+        if not issues_preview.empty:
+            st.error("Some rows are invalid and will not be monitored.")
+            st.dataframe(issues_preview, use_container_width=True, hide_index=True)
+        if st.button("Rearm all target alerts", use_container_width=True, help="Clear in-session trigger states. Any already-reached price can alert again on the next enabled refresh."):
+            st.session_state.price_alert_latches = {}
+            st.session_state.price_alert_statuses = pd.DataFrame()
+            st.rerun()
+        st.caption("In-app alerts only. Closing the browser/session stops monitoring; this is not a background or mobile push notification service.")
 
     st.sidebar.caption(f"{CREATOR_NAME} · {APP_VERSION}")
     theme_options = ["Auto", "Light", "Dark"]
@@ -3171,7 +3411,34 @@ def render_sidebar(accounts_clean: pd.DataFrame, tx_clean: pd.DataFrame) -> Dict
         "dividend_mode": dividend_mode,
         "show_closed": show_closed,
         "concentration_threshold": concentration_threshold,
+        "auto_refresh_enabled": bool(auto_refresh_enabled),
+        "auto_refresh_running": bool(auto_refresh_enabled and st_autorefresh is not None),
+        "auto_refresh_seconds": int(auto_refresh_seconds),
     }
+
+def render_target_alerts_overview() -> None:
+    rules = st.session_state.get("_price_alert_rules", pd.DataFrame())
+    if rules is None or rules.empty:
+        return
+    enabled = bool(st.session_state.get("_price_alert_monitor_enabled", False))
+    statuses = st.session_state.get("price_alert_statuses", pd.DataFrame())
+    events = st.session_state.get("price_alert_events", [])
+    active = statuses[statuses["Status"].isin(["Triggered", "Reached (already notified)"])] if not statuses.empty else pd.DataFrame()
+    if enabled and not active.empty:
+        summaries = ", ".join(f"{r['Ticker']} {r['Direction']} ${r['Target Price']:,.2f} (last ${r['Current Price']:,.2f})" for _, r in active.head(5).iterrows())
+        st.warning(f"Target price reached: {summaries}" + (" …" if len(active) > 5 else ""))
+    title = f"Target Price Alerts ({len(rules)} rules)"
+    with st.expander(title, expanded=not active.empty):
+        st.caption("Monitoring ACTIVE" if enabled else "Monitoring PAUSED — enable Auto Refresh Online Data to check target prices.")
+        if statuses is not None and not statuses.empty:
+            st.dataframe(statuses, hide_index=True, use_container_width=True)
+        else:
+            st.info("No monitoring results yet. Enable Auto Refresh Online Data to begin checking prices.")
+        if events:
+            st.caption("Recent in-session alert events (most recent first)")
+            st.dataframe(pd.DataFrame(list(reversed(events[-20:]))), hide_index=True, use_container_width=True)
+        st.caption("Uses the last available Yahoo Finance quote; data may be delayed or stale, including outside market hours. Alerts appear only while this page session runs.")
+
 
 # ============================================================
 # Main rendering
@@ -3180,6 +3447,7 @@ def render_sidebar(accounts_clean: pd.DataFrame, tx_clean: pd.DataFrame) -> Dict
 
 def render_overview(holdings: pd.DataFrame, realized_df: pd.DataFrame, dividends: pd.DataFrame, upcoming: pd.DataFrame, summary: Dict[str, float], concentration_threshold: float, cash_table: pd.DataFrame) -> None:
     render_version_banner()
+    render_target_alerts_overview()
     st.subheader("Portfolio Summary")
     c1, c2, c3, c4 = st.columns(4)
     with c1:
@@ -3801,12 +4069,33 @@ def main() -> None:
         if st.session_state.last_online_refresh == "Not refreshed in this session":
             st.session_state.last_online_refresh = now_et_str()
 
+    # Alert tickers are independent of portfolio positions and sidebar ticker filters.
+    rules, alert_quality = normalize_price_alerts(st.session_state.price_alerts_df)
+    st.session_state._price_alert_rules = rules
+    st.session_state._price_alert_monitor_enabled = bool(controls["auto_refresh_running"])
+    if controls["auto_refresh_running"] and not rules.empty:
+        alert_quotes = collect_alert_quotes(rules, online_data)
+        statuses, latches, new_events = evaluate_price_alerts(
+            rules, alert_quotes,
+            st.session_state.get("price_alert_latches", {}),
+            now_et_str(),
+        )
+        st.session_state.price_alert_latches = latches
+        st.session_state.price_alert_statuses = statuses
+        if new_events:
+            recent = st.session_state.get("price_alert_events", [])
+            st.session_state.price_alert_events = (recent + new_events)[-100:]
+            for event in new_events:
+                message = f"PRICE ALERT: {event['Ticker']} {event['Direction']} ${event['Target Price']:,.2f} — ${event['Current Price']:,.2f}"
+                st.toast(message, icon="🔔")
+    # Alerts are paused whenever Auto Refresh is disabled or unavailable.
+
     tx_detail, realized_df, holdings, dividend_analysis, summary = build_portfolio_tables(filtered_tx, filtered_div, filtered_accounts, online_data, controls["dividend_mode"])
     cash_table = build_cash_table(filtered_cash, filtered_tx_for_cash, filtered_div_for_cash, filtered_accounts, holdings)
     summary = apply_cash_summary(summary, cash_table)
     upcoming = build_upcoming_dividends(holdings, dividend_analysis, days=90)
 
-    quality_frames = [q for q in [account_quality, tx_quality, div_quality, cash_quality, online_quality] if q is not None and not q.empty]
+    quality_frames = [q for q in [account_quality, tx_quality, div_quality, cash_quality, online_quality, alert_quality] if q is not None and not q.empty]
     data_quality = pd.concat(quality_frames, ignore_index=True) if quality_frames else pd.DataFrame(columns=["Severity", "Row", "Column", "Raw Value", "Issue"])
 
     render_header(st.session_state.last_online_refresh)
