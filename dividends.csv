@@ -36,3 +36,6 @@ payment_date,ticker,net_amount,account_id,note
 2026-10-05,VGIT,2.65,SP_FID_TRA_IRA,monthly dividend
 2026-10-06,SGOV,1.2,ME_FID_TRA_IRA,monthly dividend
 2026-10-06,SGOV,0.9,SP_FID_TRA_IRA,monthly dividend
+2026-10-30,SPAXX,0.62,SP_FID_TRA_IRA,monthly dividend
+2026-10-30,SPAXX,0.71,ME_FID_TRA_IRA,monthly dividend
+2026-10-30,SPAXX,2.69,ME_FID_TAXABLE,monthly dividend
